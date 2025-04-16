@@ -25,8 +25,8 @@ let authStateStore = {
 // Базовый URL для API
 const isDevelopment = process.env.NODE_ENV === 'development';
 const API_URL = isDevelopment 
-  ? 'http://127.0.0.1:3000/api'  // Локальный адрес для разработки
-  : 'http://45.147.178.200:3000/api'; // Боевой сервер для продакшена
+  ? '$14000/api'  // Локальный адрес для разработки
+  : '$14000/api'; // Боевой сервер для продакшена
 
 // URL для скачивания OpenVPN с учетом архитектуры процессора
 function getOpenVpnDownloadUrl() {
@@ -596,7 +596,7 @@ function setupAutoUpdater() {
   // Настраиваем URL для загрузки обновлений (должен соответствовать publish.url в package.json)
   autoUpdater.setFeedURL({
     provider: 'generic',
-    url: 'http://45.147.178.200:3000/downloads'
+    url: '$14000/downloads'
   });
 
   // Настраиваем интервал проверки обновлений (каждые 2 часа)
