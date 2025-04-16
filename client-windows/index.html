@@ -1002,6 +1002,77 @@
   <!-- Скрипт renderer.js должен быть подключен после DOM -->
   <script src="./renderer.js"></script>
   
+  <!-- Отдельный скрипт диагностики для решения проблемы "кнопка Войти не работает" -->
+  <script>
+    // Немедленное выполнение при загрузке страницы
+    console.log('Диагностический скрипт запущен');
+    console.log('window.vpnAPI доступен:', typeof window.vpnAPI !== 'undefined');
+    
+    // Добавим прямое назначение обработчика на кнопку Войти
+    document.addEventListener('DOMContentLoaded', function() {
+      console.log('DOM полностью загружен');
+      
+      // Всегда показывать форму авторизации для отладки
+      const authContainer = document.getElementById('auth-container');
+      if (authContainer) {
+        authContainer.style.display = 'flex';
+        console.log('Форма авторизации отображена');
+      }
+      
+      // Прямое назначение обработчика на кнопку Войти
+      const loginBtn = document.getElementById('login-btn');
+      if (loginBtn) {
+        console.log('Кнопка Войти найдена, назначаем обработчик');
+        
+        // Удаляем существующие обработчики
+        const newLoginBtn = loginBtn.cloneNode(true);
+        loginBtn.parentNode.replaceChild(newLoginBtn, loginBtn);
+        
+        // Назначаем новый обработчик
+        newLoginBtn.addEventListener('click', function() {
+          console.log('КЛИК ПО КНОПКЕ ВОЙТИ - прямой обработчик');
+          
+          const email = document.getElementById('email').value;
+          const key = document.getElementById('key').value;
+          
+          console.log('Email:', email);
+          console.log('Key длина:', key ? key.length : 0);
+          
+          // Проверяем наличие API и вызываем аутентификацию
+          if (window.vpnAPI && window.vpnAPI.login) {
+            console.log('Вызываем vpnAPI.login напрямую');
+            
+            window.vpnAPI.login({ email: email, password: key })
+              .then(result => {
+                console.log('Результат аутентификации:', result);
+                if (result && result.success) {
+                  console.log('Авторизация успешна!');
+                  authContainer.style.display = 'none';
+                } else {
+                  console.log('Ошибка авторизации:', result ? result.error : 'Нет ответа');
+                  // Показываем ошибку
+                  const authError = document.getElementById('auth-error');
+                  if (authError) {
+                    authError.textContent = result && result.error ? result.error : 'Ошибка авторизации';
+                    authError.style.display = 'block';
+                  }
+                }
+              })
+              .catch(error => {
+                console.error('Ошибка при авторизации:', error);
+              });
+          } else {
+            console.error('window.vpnAPI.login недоступен!');
+          }
+        });
+        
+        console.log('Обработчик назначен успешно');
+      } else {
+        console.error('Кнопка Войти НЕ найдена!');
+      }
+    });
+  </script>
+  
   <!-- Панель аутентификации (скрыта после входа) -->
   <div id="auth-container" class="auth-container">
     <div class="auth-card">

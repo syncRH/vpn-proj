@@ -41,6 +41,12 @@ router.get('/public/:id/vpn-config', serverController.getFullVpnConfig);
 // Получение списка всех серверов
 router.get('/', serverController.getAllServers);
 
+// Получение аналитики серверов (ДОЛЖНО БЫТЬ ВЫШЕ router.get('/:id'))
+router.get('/analytics', serverController.getAnalytics);
+
+// Обновление статистики соединения (новый эндпоинт)
+router.post('/analytics/update', authMiddleware, serverController.updateConnectionStats);
+
 // Получение информации о конкретном сервере
 router.get('/:id', serverController.getServerById);
 

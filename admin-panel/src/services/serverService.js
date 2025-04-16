@@ -1,6 +1,7 @@
 import axios from 'axios';
+import { API_CONFIG } from '../config/api.config';
 
-const API_URL = '/api/servers';
+const API_URL = `${API_CONFIG.baseUrl}/api/servers`;
 
 // Настройка axios для включения токена в заголовки
 const axiosWithToken = (token) => {
@@ -95,4 +96,4 @@ const serverService = {
   getFullVpnConfig
 };
 
-export default serverService; 
+export default serverService;

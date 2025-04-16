@@ -1,6 +1,7 @@
 import axios from 'axios';
+import { API_CONFIG } from '../config/api.config';
 
-const API_URL = '/api/users';
+const API_URL = `${API_CONFIG.baseUrl}/api/users`;
 
 // Настройка axios для включения токена в заголовки
 const axiosWithToken = (token) => {
@@ -50,4 +51,4 @@ const userService = {
   getUserStats
 };
 
-export default userService; 
+export default userService;

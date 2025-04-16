@@ -79,8 +79,17 @@ function renderServerList(servers) {
   
   // Добавляем серверы в список
   sortedServers.forEach(server => {
+    // Проверяем, является ли сервер тем, к которому мы подключены
+    const isCurrentServer = isConnected && selectedServer && selectedServer._id === server._id;
+    
     // Расчет показателей нагрузки с учетом данных с сервера
-    const activeConnections = server.activeConnections || 0;
+    let activeConnections = server.activeConnections || 0;
+    
+    // Если это текущий сервер и мы подключены, устанавливаем минимум 1 подключение
+    if (isCurrentServer) {
+      activeConnections = Math.max(1, activeConnections);
+    }
+    
     const maxConnections = server.maxConnections || 100;
     const load = server.load !== undefined ? server.load : Math.floor((activeConnections / maxConnections) * 100);
     
@@ -103,6 +112,7 @@ function renderServerList(servers) {
         <span class="status-dot ${server.available !== false ? 'available' : 'unavailable'}"></span>
         <span class="status-text">${server.available !== false ? 'Доступен' : 'Недоступен'}</span>
       </div>
+      <div class="server-connections">Подключено: <b>${activeConnections}</b> / ${maxConnections}</div>
     `;
     
     // Добавляем обработчик клика
@@ -115,6 +125,23 @@ function renderServerList(servers) {
 
 // Выбор сервера
 function selectServer(server) {
+  // Если уже подключены и выбран другой сервер, спрашиваем подтверждение
+  if (isConnected && selectedServer && selectedServer._id !== server._id) {
+    const confirmSwitch = confirm(`Вы уже подключены к серверу: ${selectedServer.name}.\nОтключиться и подключиться к серверу: ${server.name}?`);
+    if (!confirmSwitch) {
+      addLogEntry('Переключение отменено пользователем.');
+      return;
+    }
+    // Отключаемся, затем выбираем новый сервер
+    disconnectFromVPN().then(() => {
+      selectedServer = server;
+      renderServerInfo(server);
+      updateConnectionControls();
+      updateServerStatistics(server);
+      addLogEntry(`Выбран сервер: ${server.name}`);
+    });
+    return;
+  }
   // Сохраняем выбранный сервер
   selectedServer = server;
   
@@ -150,8 +177,17 @@ function renderServerInfo(server) {
   // Получаем дополнительную информацию о нагрузке сервера
   const activeConnections = server.activeConnections || 0;
   const maxConnections = server.maxConnections || 100;
-  const load = server.load !== undefined ? server.load : Math.floor((activeConnections / maxConnections) * 100);
-  const loadLevel = formatLoadLevel(load);
+  let load = server.load;
+  let loadLevel;
+  let loadText;
+  if (load === undefined || load === null) {
+    loadText = '<span class="text-muted">нет данных</span>';
+    loadLevel = { class: 'server-load-unknown', text: 'нет данных' };
+    load = '';
+  } else {
+    loadLevel = formatLoadLevel(load);
+    loadText = `<span class="${loadLevel.class}">${load}% (${loadLevel.text})</span>`;
+  }
   
   // Отображаем информацию о сервере
   elements.serverInfo.innerHTML = `
@@ -176,9 +212,7 @@ function renderServerInfo(server) {
     </div>
     <div class="server-info-item">
       <div class="info-label">Нагрузка:</div>
-      <div class="info-value">
-        <span class="${loadLevel.class}">${load}% (${loadLevel.text})</span>
-      </div>
+      <div class="info-value">${loadText}</div>
     </div>
     <div class="server-info-item">
       <div class="info-label">Подключения:</div>
@@ -231,11 +265,19 @@ function updateConnectionControls() {
 function updateServerStatistics(server) {
   if (!server) return;
   
-  // Получаем текущую статистику с сервера или используем расчетную
   const activeConnections = server.activeConnections || 0;
   const maxConnections = server.maxConnections || 100;
-  const load = server.load !== undefined ? server.load : Math.floor((activeConnections / maxConnections) * 100);
-  const loadLevel = formatLoadLevel(load);
+  let load = server.load;
+  let loadLevel;
+  if (load === undefined || load === null) {
+    elements.serverLoadValue.textContent = 'нет данных';
+    elements.serverLoadValue.className = 'server-load-unknown';
+    elements.serverLoadBar.style.width = '0%';
+    elements.serverLoadBar.className = 'progress-bar progress-bar-unknown';
+    elements.activeConnections.textContent = activeConnections;
+    return;
+  }
+  loadLevel = formatLoadLevel(load);
   
   // Обновляем отображение активных подключений
   elements.activeConnections.textContent = activeConnections;
@@ -314,6 +356,14 @@ async function connectToVPN() {
             updateConnectionStatus('connected');
             updateConnectionControls();
             
+            // Увеличиваем локальный счетчик подключений для текущего сервера на 1
+            if (selectedServer) {
+              selectedServer.activeConnections = (selectedServer.activeConnections || 0) + 1;
+              // Обновляем отображение информации о сервере
+              renderServerInfo(selectedServer);
+              updateServerStatistics(selectedServer);
+            }
+            
             // Обновляем статистику на сервере
             await window.vpnAPI.updateConnectionStatus({
               serverId: selectedServer._id,
@@ -354,6 +404,15 @@ async function disconnectFromVPN() {
     if (result.success) {
       addLogEntry('Успешно отключено от VPN.');
       isConnected = false;
+      
+      // Уменьшаем локальный счетчик подключений для ранее подключенного сервера
+      if (selectedServer && selectedServer.activeConnections > 0) {
+        selectedServer.activeConnections -= 1;
+        // Обновляем отображение информации о сервере
+        renderServerInfo(selectedServer);
+        updateServerStatistics(selectedServer);
+      }
+      
       updateConnectionStatus('disconnected');
       updateConnectionControls();
       
@@ -419,6 +478,14 @@ function setupVPNLogListeners() {
       isConnected = true;
       updateConnectionStatus('connected');
       updateConnectionControls();
+      
+      // Увеличиваем локальный счетчик подключений для текущего сервера на 1
+      if (selectedServer) {
+        selectedServer.activeConnections = (selectedServer.activeConnections || 0) + 1;
+        // Обновляем отображение информации о сервере
+        renderServerInfo(selectedServer);
+        updateServerStatistics(selectedServer);
+      }
     }
   });
   
@@ -443,6 +510,15 @@ function setupVPNLogListeners() {
     }
     updateConnectionStatus('connected');
     updateConnectionControls();
+    
+    // Увеличиваем локальный счетчик подключений для текущего сервера на 1
+    if (selectedServer) {
+      selectedServer.activeConnections = Math.max(1, (selectedServer.activeConnections || 0) + 1);
+      // Обновляем отображение информации о сервере
+      renderServerInfo(selectedServer);
+      updateServerStatistics(selectedServer);
+    }
+    
     addLogEntry(`VPN успешно подключен к серверу ${selectedServer ? selectedServer.name : ''}.`);
   });
 }
@@ -459,6 +535,7 @@ function renderUserInfo(user) {
 
 // Показываем форму авторизации и настраиваем обработчики событий
 function showLoginForm() {
+  console.log('showLoginForm called');
   try {
     // Показываем контейнер авторизации
     const authContainer = document.getElementById('auth-container');
@@ -481,18 +558,15 @@ function showLoginForm() {
       // Добавляем обработчик клика на кнопку "Войти"
       if (loginBtn) {
         // Удаляем все существующие обработчики событий, чтобы избежать дублирования
-        loginBtn.replaceWith(loginBtn.cloneNode(true));
-        
-        // Получаем новую ссылку на кнопку после её замены
-        const newLoginBtn = document.getElementById('login-btn');
-        
+        const newLoginBtn = loginBtn.cloneNode(true);
+        loginBtn.parentNode.replaceChild(newLoginBtn, loginBtn);
         // Добавляем новый обработчик
         newLoginBtn.addEventListener('click', async () => {
+          console.log('Клик по кнопке Войти');
           try {
             // Проверяем, что поля заполнены
             const email = emailInput.value.trim();
             const key = keyInput.value.trim();
-            
             if (!email || !key) {
               if (authError) {
                 authError.textContent = 'Пожалуйста, заполните все поля';
@@ -500,43 +574,28 @@ function showLoginForm() {
               }
               return;
             }
-            
-            // Отключаем кнопку на время авторизации
             newLoginBtn.disabled = true;
             newLoginBtn.textContent = 'Авторизация...';
-            
-            // Пытаемся авторизоваться
             const success = await handleLogin(email, key);
-            
             if (success) {
-              // Если успешно, скрываем форму авторизации
               authContainer.style.display = 'none';
-              
-              // Если стоит "Запомнить меня", сохраняем данные
               if (rememberMe && rememberMe.checked) {
                 await window.vpnAPI.saveAuthCredentials({ email, key, remember: true });
               }
             } else {
-              // Если не успешно, показываем ошибку
               if (authError) {
                 authError.textContent = 'Неверные учетные данные или ошибка сервера';
                 authError.style.display = 'block';
               }
             }
-            
-            // Возвращаем кнопку в исходное состояние
             newLoginBtn.disabled = false;
             newLoginBtn.textContent = 'Войти';
           } catch (error) {
             console.error('Ошибка при обработке входа:', error);
-            
-            // Показываем ошибку
             if (authError) {
               authError.textContent = `Ошибка: ${error.message}`;
               authError.style.display = 'block';
             }
-            
-            // Возвращаем кнопку в исходное состояние
             newLoginBtn.disabled = false;
             newLoginBtn.textContent = 'Войти';
           }
@@ -576,52 +635,172 @@ function hideLoginForm() {
   }
 }
 
-// Запрос данных серверов с аналитикой
+// Получение и обработка аналитики серверов
+async function fetchServerAnalytics() {
+  try {
+    console.log('Запрос аналитики серверов...');
+    
+    const analyticsResult = await window.vpnAPI.getServerAnalytics();
+    console.log('Результат запроса аналитики:', analyticsResult);
+    
+    // Добавляем детальную проверку ответа
+    if (analyticsResult && analyticsResult.success && Array.isArray(analyticsResult.analytics)) {
+      // Обновляем данные о нагрузке серверов
+      return { success: true, analytics: analyticsResult.analytics };
+    } else if (analyticsResult && Array.isArray(analyticsResult.analytics)) {
+      // Альтернативный формат ответа
+      return { success: true, analytics: analyticsResult.analytics };
+    } else if (analyticsResult && analyticsResult.warning) {
+      // Данные из кэша или с предупреждением
+      console.warn('Предупреждение при получении аналитики:', analyticsResult.warning);
+      if (Array.isArray(analyticsResult.analytics)) {
+        return { success: true, analytics: analyticsResult.analytics, warning: analyticsResult.warning };
+      }
+    }
+    
+    // Если ни один из форматов не подошел
+    console.warn('Неизвестный формат данных аналитики:', analyticsResult);
+    return { 
+      success: false, 
+      error: 'Неизвестный формат данных аналитики',
+      analyticsResult
+    };
+  } catch (error) {
+    console.error('Ошибка при получении аналитики серверов:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// Запрос данных серверов с аналитикой - с улучшенной обработкой ошибок
 async function fetchServersWithAnalytics() {
   try {
     addLogEntry('Запрос списка серверов...');
     
+    // Сохраняем ID выбранного сервера и его состояние подключения перед обновлением
+    const previousSelectedServerId = selectedServer ? selectedServer._id : null;
+    const wasConnected = isConnected;
+    
+    // Проверка доступности API
+    if (!window.vpnAPI) {
+      console.error('ОШИБКА: window.vpnAPI не определен');
+      addLogEntry('Критическая ошибка: API не доступен. Пожалуйста, перезапустите приложение.');
+      renderError('API недоступен. Перезапустите приложение.');
+      return;
+    }
+    
     // Получаем список серверов
     const serversResult = await window.vpnAPI.getServers();
+    console.log('Результат запроса серверов:', serversResult);
     
     if (!serversResult.success) {
       if (serversResult.authRequired) {
+        console.log('Требуется авторизация для получения списка серверов');
         addLogEntry('Требуется авторизация для получения списка серверов');
         // Показываем форму авторизации
         showLoginForm();
         return;
       }
       
-      addLogEntry(`Ошибка при получении списка серверов: ${serversResult.error || 'Неизвестная ошибка'}`);
+      const errorMessage = `Ошибка при получении списка серверов: ${serversResult.error || 'Неизвестная ошибка'}`;
+      console.error(errorMessage);
+      addLogEntry(errorMessage);
       
       // Если есть запасные серверы, используем их
       if (serversResult.servers && serversResult.servers.length > 0) {
+        console.log('Используем запасные серверы:', serversResult.servers);
         servers = serversResult.servers;
         renderServerList(servers);
+      } else {
+        renderError('Не удалось загрузить список серверов');
       }
       return;
     }
     
     // Сохраняем список серверов
     servers = serversResult.servers || [];
+    console.log(`Получено ${servers.length} серверов`);
     
     // Получаем аналитику серверов для обновления данных о нагрузке
     try {
-      const analyticsResult = await window.vpnAPI.getServerAnalytics();
+      console.log('Запрашиваем аналитику серверов');
+      const analyticsResult = await fetchServerAnalytics();
+      console.log('Обработанный результат аналитики:', analyticsResult);
       
       if (analyticsResult.success && analyticsResult.analytics) {
+        // Проверяем, что analytics это массив
+        const analytics = Array.isArray(analyticsResult.analytics) 
+          ? analyticsResult.analytics 
+          : [];
+        
+        console.log(`Получено ${analytics.length} записей аналитики`);
+        
         // Обновляем данные о нагрузке серверов
         servers = servers.map(server => {
-          const serverAnalytics = analyticsResult.analytics.find(a => a.id === server._id);
+          const serverAnalytics = analytics.find(a => 
+            a.id === server._id || 
+            a.serverId === server._id ||
+            a.server_id === server._id
+          );
+          
+          // Проверяем, является ли этот сервер выбранным и подключенным
+          const isCurrentConnectedServer = wasConnected && 
+                                         previousSelectedServerId === server._id;
+          
           if (serverAnalytics) {
+            // Если это подключенный сервер, убедимся, что счетчик активных подключений как минимум 1
+            const activeConnections = isCurrentConnectedServer ? 
+              Math.max(1, serverAnalytics.activeConnections || 0) : 
+              serverAnalytics.activeConnections || 0;
+              
             return {
               ...server,
-              activeConnections: serverAnalytics.activeConnections || 0,
+              activeConnections: activeConnections,
               maxConnections: serverAnalytics.maxConnections || 100,
-              load: serverAnalytics.load || 0
+              load: serverAnalytics.load || Math.floor((activeConnections * 100) / (serverAnalytics.maxConnections || 100))
             };
           }
-          return server;
+          
+          // Если это подключенный сервер, но на нем нет данных аналитики
+          if (isCurrentConnectedServer) {
+            return {
+              ...server,
+              activeConnections: 1,
+              maxConnections: 100,
+              load: 1
+            };
+          }
+          
+          return {
+            ...server,
+            activeConnections: 0,
+            maxConnections: 100,
+            load: 0
+          };
+        });
+        
+        console.log('Обновлены данные серверов с аналитикой');
+      } else {
+        console.warn('Аналитика серверов не получена:', analyticsResult.error || 'Ответ не содержит данных аналитики');
+        addLogEntry('Не удалось получить данные о нагрузке серверов');
+        
+        // Устанавливаем дефолтные значения для нагрузки
+        servers = servers.map(server => {
+          // Если это подключенный сервер, убедимся что счетчик активных подключений как минимум 1
+          if (wasConnected && previousSelectedServerId === server._id) {
+            return {
+              ...server,
+              activeConnections: 1,
+              maxConnections: 100,
+              load: 1
+            };
+          }
+          
+          return {
+            ...server,
+            activeConnections: 0,
+            maxConnections: 100,
+            load: 0
+          };
         });
       }
     } catch (analyticsError) {
@@ -632,11 +811,27 @@ async function fetchServersWithAnalytics() {
     // Отображаем список серверов
     renderServerList(servers);
     
+    // Если список серверов пуст, показываем сообщение
+    if (!servers || servers.length === 0) {
+      console.warn('Получен пустой список серверов');
+      addLogEntry('Получен пустой список серверов');
+      renderError('Список серверов пуст. Проверьте подключение к интернету.');
+      return;
+    }
+    
     // Если ранее был выбран сервер, пытаемся его найти в новом списке
-    if (selectedServer) {
-      const updatedServer = servers.find(s => s._id === selectedServer._id);
+    if (previousSelectedServerId) {
+      const updatedServer = servers.find(s => s._id === previousSelectedServerId);
       if (updatedServer) {
-        selectServer(updatedServer);
+        // Если мы были подключены, восстановим это состояние
+        if (wasConnected) {
+          updatedServer.activeConnections = Math.max(1, updatedServer.activeConnections || 0);
+        }
+        
+        selectedServer = updatedServer;
+        renderServerInfo(updatedServer);
+        updateConnectionControls();
+        updateServerStatistics(updatedServer);
       }
     } 
     // Если сервер не был выбран и есть рекомендуемый сервер, выбираем его
@@ -668,6 +863,26 @@ async function fetchServersWithAnalytics() {
   } catch (error) {
     console.error('Ошибка при запросе серверов:', error);
     addLogEntry(`Ошибка при получении списка серверов: ${error.message}`);
+    renderError(`Ошибка: ${error.message}. Проверьте подключение.`);
+  }
+}
+
+// Функция для отображения ошибок в интерфейсе
+function renderError(message) {
+  // Отображаем ошибку в списке серверов
+  if (elements.serverList) {
+    elements.serverList.innerHTML = `
+      <div class="error">
+        <p><i class="fa fa-exclamation-triangle"></i> ${message}</p>
+        <button id="retry-button" class="btn btn-primary mt-3">Повторить</button>
+      </div>
+    `;
+    
+    // Добавляем обработчик для кнопки "Повторить"
+    const retryButton = document.getElementById('retry-button');
+    if (retryButton) {
+      retryButton.addEventListener('click', fetchServersWithAnalytics);
+    }
   }
 }
 
@@ -679,7 +894,18 @@ async function checkConnectionStatus() {
     isConnected = status.connected;
     if (status.connected && status.server) {
       selectedServer = status.server;
+      
+      // Убеждаемся, что активные подключения как минимум 1
+      if (selectedServer) {
+        selectedServer.activeConnections = Math.max(1, selectedServer.activeConnections || 0);
+      }
+      
       updateConnectionStatus('connected');
+      updateConnectionControls();
+      
+      // Обновляем отображение для сервера
+      renderServerInfo(selectedServer);
+      updateServerStatistics(selectedServer);
     } else {
       updateConnectionStatus('disconnected');
     }
@@ -746,10 +972,15 @@ async function handleLogout() {
   }
 }
 
+// Экспортируем showLoginForm для ручного вызова из консоли
+window.showLoginForm = showLoginForm;
+
 // Инициализация приложения
 async function initApp() {
   try {
     addLogEntry('Инициализация приложения...');
+    
+    console.log('window.vpnAPI:', window.vpnAPI);
     
     // Проверяем наличие сохраненной сессии
     const authState = await window.vpnAPI.checkAuthState();
@@ -802,6 +1033,9 @@ async function initApp() {
     if (elements.logoutBtn) {
       elements.logoutBtn.addEventListener('click', handleLogout);
     }
+
+    // Явно вызываем форму авторизации для отладки
+    showLoginForm();
   } catch (error) {
     console.error('Ошибка инициализации приложения:', error);
     addLogEntry(`Ошибка инициализации: ${error.message}`);
@@ -821,14 +1055,32 @@ window.vpnAPI.onServerAnalyticsUpdated((analytics) => {
     // Обновляем существующие данные о серверах
     servers = servers.map(server => {
       const serverAnalytics = analytics.find(a => a.id === server._id);
+      
+      // Если мы подключены к этому серверу, убедимся, что счетчик подключений не меньше 1
+      const isCurrentConnectedServer = isConnected && selectedServer && selectedServer._id === server._id;
+      
       if (serverAnalytics) {
+        // Для текущего подключенного сервера убедимся, что счетчик как минимум 1
+        const activeConnections = isCurrentConnectedServer ? 
+          Math.max(1, serverAnalytics.activeConnections || 0) : 
+          serverAnalytics.activeConnections || 0;
+        
         return {
           ...server,
-          activeConnections: serverAnalytics.activeConnections || 0,
+          activeConnections: activeConnections,
           maxConnections: serverAnalytics.maxConnections || 100,
           load: serverAnalytics.load || 0
         };
       }
+      
+      // Если это наш текущий подключенный сервер, сохраняем его состояние как минимум с 1 подключением
+      if (isCurrentConnectedServer) {
+        return {
+          ...server,
+          activeConnections: Math.max(1, server.activeConnections || 0)
+        };
+      }
+      
       return server;
     });
     
@@ -839,6 +1091,11 @@ window.vpnAPI.onServerAnalyticsUpdated((analytics) => {
     if (selectedServer) {
       const updatedServer = servers.find(s => s._id === selectedServer._id);
       if (updatedServer) {
+        // Сохраняем предыдущее значение activeConnections, если мы подключены
+        if (isConnected) {
+          updatedServer.activeConnections = Math.max(1, updatedServer.activeConnections || 0);
+        }
+        
         selectedServer = updatedServer;
         renderServerInfo(updatedServer);
         updateServerStatistics(updatedServer);

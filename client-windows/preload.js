@@ -105,6 +105,136 @@ const vpnAPI = {
     }
   },
 
+  // Получение аналитики серверов (статистика нагрузки)
+  getServerAnalytics: async () => {
+    try {
+      console.log('preload.js: запрос аналитики серверов');
+      const result = await ipcRenderer.invoke('get-server-analytics');
+      console.log('preload.js: получены данные аналитики:', result ? 'данные получены' : 'нет данных');
+      return result;
+    } catch (error) {
+      console.error('preload.js: ошибка при получении аналитики серверов', error);
+      return { success: false, error: error.message };
+    }
+  },
+
+  // Автоматический выбор оптимального сервера
+  autoSelectServer: async () => {
+    try {
+      console.log('preload.js: запрос на автоматический выбор сервера');
+      const result = await ipcRenderer.invoke('auto-select-server');
+      console.log('preload.js: результат автовыбора сервера:', result);
+      return result;
+    } catch (error) {
+      console.error('preload.js: ошибка при автовыборе сервера', error);
+      return { success: false, error: error.message };
+    }
+  },
+
+  // Получение статуса подключения VPN
+  getConnectionStatus: async () => {
+    try {
+      console.log('preload.js: запрос статуса подключения');
+      const result = await ipcRenderer.invoke('check-vpn-status');
+      console.log('preload.js: получен статус подключения:', result);
+      return result;
+    } catch (error) {
+      console.error('preload.js: ошибка при получении статуса подключения', error);
+      return { connected: false, error: error.message };
+    }
+  },
+
+  // Обновление статуса подключения к серверу (для аналитики)
+  updateConnectionStatus: async (params) => {
+    try {
+      console.log('preload.js: обновление статуса подключения:', params);
+      const result = await ipcRenderer.invoke('update-connection-status', params);
+      console.log('preload.js: результат обновления статуса:', result);
+      return result;
+    } catch (error) {
+      console.error('preload.js: ошибка при обновлении статуса подключения', error);
+      return { success: false, error: error.message };
+    }
+  },
+
+  // Проверка состояния авторизации
+  checkAuthState: async () => {
+    try {
+      console.log('preload.js: запрос состояния авторизации');
+      const result = await ipcRenderer.invoke('check-auth-state');
+      console.log('preload.js: получено состояние авторизации:', result);
+      return result;
+    } catch (error) {
+      console.error('preload.js: ошибка при проверке состояния авторизации', error);
+      return { isAuthenticated: false, error: error.message };
+    }
+  },
+
+  // Получение информации о пользователе
+  getUserInfo: async () => {
+    try {
+      console.log('preload.js: запрос информации о пользователе');
+      const result = await ipcRenderer.invoke('get-user-info');
+      console.log('preload.js: получена информация о пользователе:', result);
+      return result;
+    } catch (error) {
+      console.error('preload.js: ошибка при получении информации о пользователе', error);
+      return null;
+    }
+  },
+
+  // Загрузка сохраненного токена авторизации
+  loadSavedAuthToken: async () => {
+    try {
+      console.log('preload.js: загрузка сохраненного токена авторизации');
+      const result = await ipcRenderer.invoke('load-saved-auth-token');
+      console.log('preload.js: результат загрузки токена:', result);
+      return result;
+    } catch (error) {
+      console.error('preload.js: ошибка при загрузке сохраненного токена', error);
+      return { success: false, error: error.message };
+    }
+  },
+
+  // Сохранение учетных данных
+  saveAuthCredentials: async (credentials) => {
+    try {
+      console.log('preload.js: сохранение учетных данных');
+      const result = await ipcRenderer.invoke('save-auth-credentials', credentials);
+      console.log('preload.js: результат сохранения учетных данных:', result);
+      return result;
+    } catch (error) {
+      console.error('preload.js: ошибка при сохранении учетных данных', error);
+      return { success: false, error: error.message };
+    }
+  },
+
+  // Выход из системы
+  logout: async () => {
+    try {
+      console.log('preload.js: выход из системы');
+      const result = await ipcRenderer.invoke('logout');
+      console.log('preload.js: результат выхода:', result);
+      return result;
+    } catch (error) {
+      console.error('preload.js: ошибка при выходе из системы', error);
+      return { success: false, error: error.message };
+    }
+  },
+
+  // Метод для совместимости с кодом рендерера
+  login: async (credentials) => {
+    console.log('preload.js: вызов login() (обертка для authenticate)');
+    if (credentials && typeof credentials === 'object') {
+      const { email, password } = credentials;
+      console.log(`preload.js: login с объектом credentials, email=${email}, password длиной ${password ? password.length : 0}`);
+      return await vpnAPI.authenticate(email, password);
+    } else {
+      console.log('preload.js: login с прямыми параметрами');
+      return await vpnAPI.authenticate(credentials, arguments[1]); // поддержка старого формата
+    }
+  },
+
   // Аутентификация пользователя
   authenticate: async (email, key) => {
     try {
@@ -125,19 +255,6 @@ const vpnAPI = {
     } catch (error) {
       console.error('preload.js: ошибка аутентификации', error);
       throw error;
-    }
-  },
-
-  // Метод для совместимости с кодом рендерера
-  login: async (credentials) => {
-    console.log('preload.js: вызов login() (обертка для authenticate)');
-    if (credentials && typeof credentials === 'object') {
-      const { email, password } = credentials;
-      console.log(`preload.js: login с объектом credentials, email=${email}, password длиной ${password ? password.length : 0}`);
-      return await vpnAPI.authenticate(email, password);
-    } else {
-      console.log('preload.js: login с прямыми параметрами');
-      return await vpnAPI.authenticate(credentials, arguments[1]); // поддержка старого формата
     }
   },
 
@@ -171,6 +288,45 @@ const vpnAPI = {
       configPath,
       connectionType
     });
+  },
+
+  // Подключение к VPN (комбинированный метод для скачивания конфигурации и подключения)
+  connectToVPN: async (params) => {
+    try {
+      console.log('preload.js: запрос на подключение к VPN:', params);
+      
+      if (!params || !params.serverId) {
+        console.error('preload.js: не указан ID сервера для подключения');
+        return { 
+          success: false, 
+          error: 'Не указан ID сервера для подключения' 
+        };
+      }
+      
+      // Вызываем обработчик connect-vpn в main процессе
+      const result = await ipcRenderer.invoke('connect-vpn', params);
+      console.log('preload.js: результат подключения к VPN:', result);
+      return result;
+    } catch (error) {
+      console.error('preload.js: ошибка при подключении к VPN:', error);
+      return {
+        success: false,
+        error: error.message || 'Неизвестная ошибка при подключении к VPN'
+      };
+    }
+  },
+
+  // Отключение от VPN
+  disconnectFromVPN: async () => {
+    try {
+      console.log('preload.js: отключение от VPN');
+      const result = await ipcRenderer.invoke('disconnect-vpn');
+      console.log('preload.js: результат отключения', result);
+      return result;
+    } catch (error) {
+      console.error('preload.js: ошибка отключения', error);
+      throw error;
+    }
   },
 
   // Отключение от VPN
@@ -240,6 +396,15 @@ const vpnAPI = {
     ipcRenderer.on('open-settings', () => {
       console.log('preload.js: получен open-settings');
       callback();
+    });
+  },
+
+  // Обработчик для обновления аналитики серверов
+  onServerAnalyticsUpdated: (callback) => {
+    console.log('preload.js: регистрация обработчика для server-analytics-updated');
+    ipcRenderer.on('server-analytics-updated', (_, data) => {
+      console.log('preload.js: получено обновление аналитики серверов');
+      callback(data);
     });
   },
 

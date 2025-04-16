@@ -8,6 +8,45 @@ const util = require('util');
 // Преобразуем функцию exec в промис
 const execPromise = util.promisify(exec);
 
+// Map to track unique client connections to servers
+// Key: serverId_clientId, Value: connection timestamp
+const activeConnectionsMap = new Map();
+
+// Helper function to get active connection count for a server
+function getActiveConnectionCount(serverId) {
+  let count = 0;
+  for (const key of activeConnectionsMap.keys()) {
+    if (key.startsWith(`${serverId}_`)) {
+      count++;
+    }
+  }
+  return count;
+}
+
+// Helper function to cleanup stale connections (older than 1 hour)
+function cleanupStaleConnections() {
+  const oneHourAgo = Date.now() - (60 * 60 * 1000);
+  
+  for (const [key, timestamp] of activeConnectionsMap.entries()) {
+    if (timestamp < oneHourAgo) {
+      const [serverId, clientId] = key.split('_');
+      console.log(`Cleaning up stale connection: clientId=${clientId}, serverId=${serverId}`);
+      activeConnectionsMap.delete(key);
+      
+      // Update server connection count in the database
+      Server.findById(serverId).then(server => {
+        if (server) {
+          server.activeConnections = getActiveConnectionCount(serverId);
+          server.save().catch(err => console.error('Error updating server after cleanup:', err));
+        }
+      }).catch(err => console.error('Error finding server during cleanup:', err));
+    }
+  }
+}
+
+// Run cleanup every 15 minutes
+setInterval(cleanupStaleConnections, 15 * 60 * 1000);
+
 // Получение списка всех серверов
 exports.getAllServers = async (req, res) => {
   try {
@@ -688,5 +727,111 @@ exports.recordServerDisconnect = async (req, res) => {
   } catch (error) {
     console.error('Error recording server disconnection:', error);
     res.status(500).json({ message: 'Server error while recording disconnection' });
+  }
+};
+
+// Получение аналитики серверов
+exports.getAnalytics = async (req, res) => {
+  try {
+    // Get all servers with their connection data
+    const servers = await Server.find().select('_id name ipAddress activeConnections maxConnections country city');
+    
+    // Calculate additional analytics for each server
+    const serversWithAnalytics = servers.map(server => {
+      // Calculate load percentage (default max connections to 100 if not specified)
+      const maxConnections = server.maxConnections || 100;
+      const load = Math.floor((server.activeConnections / maxConnections) * 100);
+      
+      return {
+        _id: server._id,
+        name: server.name,
+        ipAddress: server.ipAddress,
+        country: server.country,
+        city: server.city,
+        activeConnections: server.activeConnections || 0,
+        maxConnections: maxConnections,
+        load: load > 100 ? 100 : load, // Cap at 100%
+        isActive: server.isActive
+      };
+    });
+    
+    res.status(200).json({ 
+      servers: serversWithAnalytics,
+      totalServers: serversWithAnalytics.length,
+      totalConnections: serversWithAnalytics.reduce((sum, server) => sum + (server.activeConnections || 0), 0)
+    });
+  } catch (error) {
+    console.error('Ошибка при получении аналитики серверов:', error);
+    res.status(500).json({ message: 'Ошибка сервера при получении аналитики' });
+  }
+};
+
+// Обновление статистики подключения клиентов
+exports.updateConnectionStats = async (req, res) => {
+  try {
+    const { serverId, status, clientId } = req.body;
+    
+    if (!serverId) {
+      return res.status(400).json({ message: 'Требуется указать ID сервера' });
+    }
+    
+    if (!status) {
+      return res.status(400).json({ message: 'Требуется указать статус подключения' });
+    }
+    
+    if (!clientId) {
+      return res.status(400).json({ message: 'Требуется указать ID клиента' });
+    }
+    
+    // Находим сервер
+    const server = await Server.findById(serverId);
+    if (!server) {
+      return res.status(404).json({ message: 'Сервер не найден' });
+    }
+    
+    console.log(`Обновление статистики подключения: ${clientId} ${status} к серверу ${server.name}`);
+    
+    const connectionKey = `${serverId}_${clientId}`;
+    
+    // Обновляем счетчик активных подключений в зависимости от статуса
+    if (status === 'connected') {
+      // Check if this client is already connected to prevent duplicate counts
+      if (!activeConnectionsMap.has(connectionKey)) {
+        activeConnectionsMap.set(connectionKey, Date.now());
+        console.log(`New connection from ${clientId} to server ${server.name}`);
+      } else {
+        console.log(`Client ${clientId} already connected to server ${server.name}, refreshing timestamp`);
+        activeConnectionsMap.set(connectionKey, Date.now()); // Update timestamp
+      }
+    } else if (status === 'disconnected') {
+      // Remove the connection if it exists
+      if (activeConnectionsMap.has(connectionKey)) {
+        activeConnectionsMap.delete(connectionKey);
+        console.log(`Client ${clientId} disconnected from server ${server.name}`);
+      }
+    }
+    
+    // Update the server's active connection count based on the actual map state
+    const realConnectionCount = getActiveConnectionCount(serverId);
+    console.log(`Server ${server.name} real connection count: ${realConnectionCount}`);
+    
+    // Update the server's connection count in the database
+    server.activeConnections = realConnectionCount;
+    await server.save();
+    
+    res.status(200).json({
+      message: `Статус подключения к ${server.name} обновлен: ${status}`,
+      serverId: serverId,
+      status: status,
+      activeConnections: server.activeConnections,
+      success: true
+    });
+  } catch (error) {
+    console.error('Ошибка при обновлении статистики подключения:', error);
+    res.status(500).json({ 
+      message: 'Ошибка сервера при обновлении статистики подключения',
+      error: error.message,
+      success: false
+    });
   }
 };

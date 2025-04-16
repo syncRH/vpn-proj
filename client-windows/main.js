@@ -8,12 +8,26 @@ const electron = require('electron');
 const https = require('https');
 const sudo = require('sudo-prompt');
 
+// Инициализируем временное хранилище для авторизации (будет заменено на electron-store позже)
+let authStateStore = {
+  isAuthenticated: false,
+  user: null,
+  token: null,
+  refreshToken: null
+};
+
 // Базовый URL для API
-const API_URL = 'http://127.0.0.1:3000/api';
+const isDevelopment = process.env.NODE_ENV === 'development';
+const API_URL = isDevelopment 
+  ? 'http://127.0.0.1:3000/api'  // Локальный адрес для разработки
+  : 'http://45.147.178.200:3000/api'; // Боевой сервер для продакшена
 
 // URL для скачивания OpenVPN
 const OPENVPN_DOWNLOAD_URL = 'https://swupdate.openvpn.org/community/releases/OpenVPN-2.5.8-I601-amd64.msi';
 const OPENVPN_INSTALLER_PATH = path.join(os.tmpdir(), 'openvpn-installer.msi');
+
+// Глобальный идентификатор клиента для статистики подключений
+let clientId = null;
 
 let mainWindow;
 let vpnProcess = null;
@@ -42,9 +56,117 @@ let authState = {
 // Global variable to store server analytics
 let serverAnalytics = [];
 
+// Utility function for making API requests with retry logic and rate limit handling
+async function makeApiRequest(config) {
+  const { method = 'get', url, data, headers = {}, maxRetries = 3, baseDelay = 1000 } = config;
+  let retries = 0;
+  
+  while (retries <= maxRetries) {
+    try {
+      console.log(`Попытка запроса ${retries > 0 ? `(повтор ${retries}/${maxRetries})` : ''}: ${method.toUpperCase()} ${url}`);
+      
+      const requestConfig = {
+        method,
+        url,
+        headers: {
+          ...headers,
+          // Add auth token if available and not already set
+          ...(authToken && !headers['Authorization'] ? { 'Authorization': `Bearer ${authToken}` } : {})
+        },
+        timeout: 15000 // 15 seconds timeout
+      };
+      
+      // Add data payload for POST/PUT requests
+      if (data && (method === 'post' || method === 'put')) {
+        requestConfig.data = data;
+      }
+      
+      const response = await axios(requestConfig);
+      return response;
+    } catch (error) {
+      if (error.response) {
+        const { status, headers } = error.response;
+        
+        // If rate limited (429 error)
+        if (status === 429) {
+          retries++;
+          
+          if (retries > maxRetries) {
+            console.error(`Превышено максимальное количество попыток (${maxRetries}) для ${url}`);
+            throw error;
+          }
+          
+          // Get retry-after header or use exponential backoff
+          let retryDelay;
+          if (headers && headers['retry-after']) {
+            retryDelay = parseInt(headers['retry-after'], 10) * 1000;
+            console.log(`Сервер запросил ожидание ${retryDelay/1000} секунд`);
+          } else {
+            // Exponential backoff with jitter
+            retryDelay = baseDelay * Math.pow(2, retries) + Math.random() * 1000;
+            console.log(`Применяем экспоненциальную задержку: ${Math.round(retryDelay/1000)} секунд`);
+          }
+          
+          // Notify the renderer process about the rate limiting
+          if (mainWindow) {
+            mainWindow.webContents.send('api-rate-limited', { 
+              retryDelay: Math.round(retryDelay/1000),
+              retryCount: retries,
+              maxRetries,
+              endpoint: url
+            });
+          }
+          
+          console.log(`Слишком много запросов (429), ожидание ${Math.round(retryDelay/1000)} секунд...`);
+          await new Promise(resolve => setTimeout(resolve, retryDelay));
+          continue;
+        } 
+        // If other server error that might be transient (500-range)
+        else if (status >= 500 && status < 600 && retries < maxRetries) {
+          retries++;
+          const retryDelay = baseDelay * Math.pow(1.5, retries);
+          console.log(`Ошибка сервера (${status}), повтор через ${Math.round(retryDelay/1000)} секунд...`);
+          await new Promise(resolve => setTimeout(resolve, retryDelay));
+          continue;
+        }
+      }
+      
+      // If network error or request timeout, retry with backoff
+      if (error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT' || !error.response) {
+        retries++;
+        if (retries <= maxRetries) {
+          const retryDelay = baseDelay * Math.pow(2, retries);
+          console.log(`Проблема с сетью, повтор через ${Math.round(retryDelay/1000)} секунд...`);
+          await new Promise(resolve => setTimeout(resolve, retryDelay));
+          continue;
+        }
+      }
+      
+      // If we've reached here, it's a non-recoverable error
+      throw error;
+    }
+  }
+  
+  throw new Error(`Превышено максимальное количество попыток (${maxRetries})`);
+}
+
 // Load auth state from storage on startup
-function loadAuthState() {
+async function loadAuthState() {
   try {
+    const Store = (await import('electron-store')).default;
+    const store = new Store({
+      name: 'vpn-client-preferences',
+      encryptionKey: 'your-encryption-key', // Замените на реальный ключ шифрования
+      defaults: {
+        authState: {
+          isAuthenticated: false,
+          user: null,
+          token: null,
+          refreshToken: null
+        }
+      }
+    });
+
     const savedState = store.get('authState');
     if (savedState) {
       console.log('Loaded saved authentication state');
@@ -58,8 +180,14 @@ function loadAuthState() {
 }
 
 // Save auth state to storage
-function saveAuthState() {
+async function saveAuthState() {
   try {
+    const Store = (await import('electron-store')).default;
+    const store = new Store({
+      name: 'vpn-client-preferences',
+      encryptionKey: 'your-encryption-key'
+    });
+
     store.set('authState', authState);
     console.log('Saved authentication state');
   } catch (error) {
@@ -68,7 +196,7 @@ function saveAuthState() {
 }
 
 // Clear auth state
-function clearAuthState() {
+async function clearAuthState() {
   authState = {
     isAuthenticated: false,
     user: null,
@@ -76,6 +204,12 @@ function clearAuthState() {
     refreshToken: null
   };
   try {
+    const Store = (await import('electron-store')).default;
+    const store = new Store({
+      name: 'vpn-client-preferences',
+      encryptionKey: 'your-encryption-key'
+    });
+
     store.delete('authState');
     console.log('Cleared authentication state');
   } catch (error) {
@@ -328,7 +462,7 @@ function createTray() {
     try {
       // Вместо загрузки из файла создаем иконку программно
       const defaultIcon = nativeImage.createFromBuffer(
-        Buffer.from('iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAACXBIWXMAAAsTAAALEwEAmpwYAAAAIGNIUk0AAHolAACAgwAA+f8AAIDpAAB1MAAA6mAAADqYAAAXb5JfxUYAAAFCSURBVHjaYvz//z8DJYCJgUIwdAxgYWBgYNiwfv3/P79/M/z984cBxGeEsP/++cMQFRPDwMTExPD161cGf39/RqK8sGH9+v9z58xh+PnzJwMrKysDCwsLAxMTE8Pfv38ZPn36RJwXfv/+zfD48WOGjx8/MvDw8DDw8/Mz8PPzM3z79o1hxYoVDH/+/CHOBf///2dYuXIlQ05ODkNQUBCDlJQUw9evXxnWrl3LsGfPHoafP38SH4iwAP/37x/DixcvGNatW8fw4cMHop3GCPPCnz9/cPK3bt3KMGvWLOI0g1xQUVHBIC8vj9cF9+/fZ8jMzCROMyMsc0RGRuI0/MOHD6SlaFZWVoaAgACsBjx//pyhvb2dNM0gF3BxcTHw8vIyXLt2jYGZmZk0zTBQXl7OwMbGRl6WYBwNRIoBGADSlEe2CvKyFwAAAABJRU5ErkJggg==', 'base64')
+        Buffer.from('iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAACXBIWXMAAAsTAAALEwEAmpwYAAAAIGNIUk0AAHolAACAgwAA+f8AAIDpAAB1MAAA6mAAADqYAAAXb5JfxUYAAAE3SURBVHjaYvz//z8DJYCJgUIwdAxgYWBgYNiwfv3/P79/M/z984cBxGeEsP/++cMQFRPDwMTExPD161cGf39/RqK8sGH9+v9z58xh+PnzJwMrKysDCwsLAxMTE8Pfv38ZPn36RJwXfv/+zfD48WOGjx8/MvDw8DDw8/Mz8PPzM3z79o1hxYoVDH/+/CHOBf///2dYuXIlQ05ODkNQUBCDlJQUw9evXxnWrl3LsGfPHoafP38SH4iwAP/37x/DixcvGNatW8fw4cMHop3GCPPCnz9/cPK3bt3KMGvWLOI0g1xQUVHBIC8vj9cF9+/fZ8jMzCROMyMsc0RGRuI0/MOHD6SlaFZWVoaAgACsBjx//pyhvb2dNM0gF3BxcTHw8vIyXLt2jYGZmZk0zTBQXl7OwMbGRl6WYBwNRIoBGADMIUp+zQZI9QAAAABJRU5ErkJggg==', 'base64')
       );
       trayIcon = defaultIcon;
       console.log('Создана иконка трея программно');
@@ -437,6 +571,9 @@ app.whenReady().then(async () => {
   await electron.session.defaultSession.clearCache();
   console.log('Кэш очищен успешно');
   
+  // Инициализируем уникальный ID клиента
+  await initializeClientId();
+  
   // Загружаем сохраненный токен авторизации, если он есть
   loadSavedAuthToken();
   
@@ -490,42 +627,180 @@ function updateTrayIcon() {
   if (!tray) return;
   
   try {
-    // Создаем пустую иконку размером 16x16 пикселей
-    const emptyIcon = nativeImage.createEmpty();
-    
+    // Используем реальные файлы иконок
     if (isConnected) {
       // Подключено - зеленая иконка
       console.log('VPN подключен, устанавливаем иконку активного соединения');
       try {
-        // Вместо загрузки из файла создаем зеленую иконку
-        const connectedIcon = nativeImage.createFromBuffer(
-          Buffer.from('iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAACXBIWXMAAAsTAAALEwEAmpwYAAAAIGNIUk0AAHolAACAgwAA+f8AAIDpAAB1MAAA6mAAADqYAAAXb5JfxUYAAAE3SURBVHjaYvz//z8DJYCJgUIwdAxgYWBgYNiwfv3/P79/M/z984cBxGeEsP/++cMQFRPDwMTExPD161cGf39/RqK8sGH9+v9z58xh+PnzJwMrKysDCwsLAxMTE8Pfv38ZPn36RJwXfv/+zfD48WOGjx8/MvDw8DDw8/Mz8PPzM3z79o1hxYoVDH/+/CHOBf///2dYuXIlQ05ODkNQUBCDlJQUw9evXxnWrl3LsGfPHoafP38SH4iwAP/37x/DixcvGNatW8fw4cMHop3GCPPCnz9/cPK3bt3KMGvWLOI0g1xQUVHBIC8vj9cF9+/fZ8jMzCROMyMsc0RGRuI0/MOHD6SlaFZWVoaAgACsBjx//pyhvb2dNM0gF3BxcTHw8vIyXLt2jYGZmZk0zTBQXl7OwMbGRl6WYBwNRIoBGADMIUp+zQZI9QAAAABJRU5ErkJggg==', 'base64')
-        );
-        tray.setImage(connectedIcon);
-        console.log('Установлена иконка активного VPN');
+        if (fs.existsSync(TRAY_ICON_CONNECTED_PATH)) {
+          const connectedIcon = nativeImage.createFromPath(TRAY_ICON_CONNECTED_PATH);
+          tray.setImage(connectedIcon);
+          console.log('Установлена иконка активного VPN');
+        } else {
+          console.error('Файл иконки не найден:', TRAY_ICON_CONNECTED_PATH);
+          // Используем стандартную иконку
+          const defaultIcon = nativeImage.createFromPath(TRAY_ICON_DEFAULT_PATH);
+          tray.setImage(defaultIcon);
+        }
       } catch (err) {
         console.error('Ошибка при установке иконки активного состояния:', err);
-        tray.setImage(emptyIcon);
-        console.log('Установлена пустая иконка из-за ошибки');
+        // Используем стандартную иконку
+        const defaultIcon = nativeImage.createFromPath(TRAY_ICON_DEFAULT_PATH);
+        tray.setImage(defaultIcon);
       }
     } else {
       // Отключено - красная иконка
       console.log('VPN отключен, устанавливаем иконку неактивного соединения');
       try {
-        // Вместо загрузки из файла создаем красную иконку
-        const disconnectedIcon = nativeImage.createFromBuffer(
-          Buffer.from('iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAACXBIWXMAAAsTAAALEwEAmpwYAAAAIGNIUk0AAHolAACAgwAA+f8AAIDpAAB1MAAA6mAAADqYAAAXb5JfxUYAAAFCSURBVHjaYvz//z8DJYCJgUIwdAxgYWBgYNiwfv3/P79/M/z984cBxGeEsP/++cMQFRPDwMTExPD161cGf39/RqK8sGH9+v9z58xh+PnzJwMrKysDCwsLAxMTE8Pfv38ZPn36RJwXfv/+zfD48WOGjx8/MvDw8DDw8/Mz8PPzM3z79o1hxYoVDH/+/CHOBf///2dYuXIlQ05ODkNQUBCDlJQUw9evXxnWrl3LsGfPHoafP38SH4iwAP/37x/DixcvGNatW8fw4cMHop3GCPPCnz9/cPK3bt3KMGvWLOI0g1xQUVHBIC8vj9cF9+/fZ8jMzCROMyMsc0RGRuI0/MOHD6SlaFZWVoaAgACsBjx//pyhvb2dNM0gF3BxcTHw8vIyXLt2jYGZmZk0zTBQXl7OwMbGRl6WYBwNRIoBGADSlEe2CvKyFwAAAABJRU5ErkJggg==', 'base64')
-        );
-        tray.setImage(disconnectedIcon);
-        console.log('Установлена иконка неактивного VPN');
+        if (fs.existsSync(TRAY_ICON_DISCONNECTED_PATH)) {
+          const disconnectedIcon = nativeImage.createFromPath(TRAY_ICON_DISCONNECTED_PATH);
+          tray.setImage(disconnectedIcon);
+          console.log('Установлена иконка неактивного VPN');
+        } else {
+          console.error('Файл иконки не найден:', TRAY_ICON_DISCONNECTED_PATH);
+          // Используем стандартную иконку
+          const defaultIcon = nativeImage.createFromPath(TRAY_ICON_DEFAULT_PATH);
+          tray.setImage(defaultIcon);
+        }
       } catch (err) {
         console.error('Ошибка при загрузке иконки неактивного состояния:', err);
-        tray.setImage(emptyIcon);
-        console.log('Установлена стандартная иконка трея');
+        // Используем стандартную иконку
+        const defaultIcon = nativeImage.createFromPath(TRAY_ICON_DEFAULT_PATH);
+        tray.setImage(defaultIcon);
       }
     }
   } catch (err) {
     console.error('Общая ошибка при обновлении иконки трея:', err);
+    // В случае ошибки пробуем установить стандартную иконку
+    try {
+      const defaultIcon = nativeImage.createFromPath(TRAY_ICON_DEFAULT_PATH);
+      tray.setImage(defaultIcon);
+    } catch (fallbackError) {
+      console.error('Критическая ошибка при установке иконки трея:', fallbackError);
+    }
+  }
+}
+
+// Function to verify VPN connection by pinging a remote server
+async function verifyVpnConnection() {
+  try {
+    console.log('Проверка реального статуса VPN-соединения...');
+    
+    // Use ping to test connection to a reliable server (like Google's DNS)
+    const pingTarget = '8.8.8.8'; // Google's DNS server
+    
+    return new Promise((resolve) => {
+      const pingProcess = spawn(
+        'ping', 
+        ['-n', '2', pingTarget], // -n 2: send 2 packets (Windows command)
+        { windowsHide: true }
+      );
+      
+      let pingOutput = '';
+      let pingSuccess = false;
+      
+      pingProcess.stdout.on('data', (data) => {
+        // Convert buffer to string, handling potential encoding issues
+        try {
+          const output = data.toString('utf8');
+          pingOutput += output;
+          
+          // Check for successful ping reply regardless of language
+          // Looking for common patterns in ping output that indicate success
+          if (output.includes('Reply from') || 
+              output.includes('bytes from') || 
+              output.includes('TTL=') || 
+              output.includes('time=')) {
+            pingSuccess = true;
+          }
+        } catch (encodingError) {
+          console.error('Ошибка кодировки при обработке вывода ping:', encodingError);
+          // Try alternative encoding or raw check
+          const rawOutput = data.toString('binary');
+          if (rawOutput.includes('TTL=') || rawOutput.includes('time=')) {
+            pingSuccess = true;
+          }
+        }
+      });
+      
+      pingProcess.on('error', (error) => {
+        console.error('Ошибка при проверке соединения:', error);
+        resolve(false);
+      });
+      
+      pingProcess.on('close', (code) => {
+        console.log(`Результат проверки соединения: ${pingSuccess ? 'успешно' : 'неудачно'} (код ${code})`);
+        
+        // Code 0 typically means success even if our string parsing failed
+        if (code === 0) {
+          pingSuccess = true;
+        }
+        
+        resolve(pingSuccess);
+      });
+    });
+  } catch (error) {
+    console.error('Ошибка при проверке VPN-соединения:', error);
+    return false;
+  }
+}
+
+// Enhanced connection status update function that verifies actual connectivity
+async function updateConnectionStatusWithValidation(connected, server) {
+  try {
+    console.log(`Обновление статуса подключения: ${connected ? 'подключено' : 'отключено'}`);
+    
+    // Update internal state first
+    isConnected = connected;
+    selectedServer = connected ? server : null;
+    
+    // If we're supposedly connected, verify it's actually working
+    if (connected) {
+      console.log('Выполняем проверку реального соединения...');
+      
+      // Wait a moment for connection to stabilize
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      
+      // Verify the connection is actually working
+      const isReallyConnected = await verifyVpnConnection();
+      
+      if (!isReallyConnected) {
+        console.error('ПРЕДУПРЕЖДЕНИЕ: VPN показывает как подключенный, но соединение не работает!');
+        
+        // Notify the user that the connection isn't working properly
+        if (mainWindow) {
+          mainWindow.webContents.send('vpn-connection-problem', {
+            message: 'VPN подключение установлено, но интернет не работает. Проверьте настройки сети.'
+          });
+        }
+        
+        // You could attempt reconnection here or show options to the user
+      } else {
+        console.log('Проверка соединения успешна, VPN работает корректно.');
+        
+        // Notify the renderer about successful connection
+        if (mainWindow) {
+          mainWindow.webContents.send('vpn-connection-verified', {
+            server: selectedServer
+          });
+        }
+      }
+    }
+    
+    // Update tray icon and menu regardless of verification result
+    updateTrayIcon();
+    updateTrayMenu();
+    
+    return {
+      success: true,
+      verified: connected ? await verifyVpnConnection() : true // Always true when disconnected
+    };
+  } catch (error) {
+    console.error('Ошибка при обновлении и проверке статуса подключения:', error);
+    return {
+      success: false,
+      error: error.message
+    };
   }
 }
 
@@ -625,20 +900,14 @@ async function getServerList() {
   console.log('Запрос списка серверов...');
   
   try {
-    const config = {
-      headers: {},
-      timeout: 10000 // таймаут 10 сек
-    };
-    
-    // Добавляем заголовок с токеном авторизации, если он есть
-    if (authToken) {
-      console.log('Используем токен авторизации для запроса серверов');
-      config.headers['Authorization'] = `Bearer ${authToken}`;
-    } else {
-      console.warn('Токен авторизации отсутствует, запрос будет выполнен без авторизации');
-    }
-    
-    const response = await axios.get(`${API_URL}/servers`, config);
+    // Используем нашу функцию makeApiRequest с поддержкой повторных попыток
+    const response = await makeApiRequest({
+      method: 'get',
+      url: `${API_URL}/servers`,
+      headers: authToken ? { 'Authorization': `Bearer ${authToken}` } : {},
+      maxRetries: 2, // Максимум 2 повторные попытки
+      baseDelay: 1000 // Начальная задержка 1 секунда
+    });
     
     // Проверяем формат ответа и извлекаем список серверов
     let serverList = [];
@@ -655,7 +924,10 @@ async function getServerList() {
     console.log(`Получено ${serverList.length} серверов от API`);
     
     // Возвращаем список серверов
-    return { servers: serverList };
+    return { 
+      success: true,
+      servers: serverList 
+    };
   } catch (error) {
     console.error(`Ошибка при получении серверов: ${error.message}`);
     
@@ -673,14 +945,26 @@ async function getServerList() {
             message: 'Требуется авторизация для получения списка серверов' 
           });
         }
+        
+        return { 
+          success: false, 
+          authRequired: true, 
+          error: 'Требуется авторизация' 
+        };
+      } else if (statusCode === 429) {
+        return {
+          success: false,
+          error: 'Слишком много запросов, попробуйте позже',
+          retryAfter: error.response.headers['retry-after'] || 60
+        };
       }
       
-      // Детали ответа сервера при ошибке
+      // Детали ответа сервера при других ошибках
       console.error('Детали ошибки:', error.response.data);
     }
     
     // Возвращаем пустой список при ошибке
-    return { servers: [], error: error.message };
+    return { success: false, servers: [], error: error.message };
   }
 }
 
@@ -781,16 +1065,20 @@ async function getOptimalServer() {
     
     // If we have analytics data, use it to find the best server
     if (serverAnalytics && serverAnalytics.length > 0) {
-      // Sort servers by load (lowest first)
-      const sortedServers = [...serverAnalytics].sort((a, b) => a.load - b.load);
-      
+      // Находим минимальную загрузку
+      const minLoad = Math.min(...serverAnalytics.map(s => s.load));
+      // Фильтруем серверы с минимальной загрузкой
+      let minLoadServers = serverAnalytics.filter(s => s.load === minLoad);
+      // Если среди них есть рекомендуемые — выбираем только их
+      const recommended = minLoadServers.filter(s => s.isRecommended);
+      if (recommended.length > 0) minLoadServers = recommended;
+      // Случайный выбор среди подходящих
+      const chosen = minLoadServers[Math.floor(Math.random() * minLoadServers.length)];
       console.log('Server load distribution:');
-      sortedServers.forEach(server => {
+      serverAnalytics.forEach(server => {
         console.log(`- ${server.name}: ${server.load}% (${server.activeConnections}/${server.maxConnections} connections)`);
       });
-      
-      // Return the server with the lowest load
-      return sortedServers[0];
+      return chosen;
     }
     
     // Fallback to getting the server list and choosing one with random load
@@ -928,7 +1216,7 @@ async function findOptimalServer() {
     console.error('Ошибка при поиске оптимального сервера:', error);
     return { 
       success: false, 
-      error: `Ошибка при выборе сервера: ${error.message || 'Неизвестная ошибка'}`
+      error: `Ошибка при выборе сервера: ${error.message || 'Неизвестная ошибка'}` 
     };
   }
 }
@@ -943,39 +1231,88 @@ async function updateServerConnectionStatus(serverId, status) {
     
     console.log(`Обновление статистики подключения для сервера ${serverId}: ${status}`);
     
-    // Нормализуем ID сервера
+    // Normalize server ID
     let serverIdString = serverId;
     if (typeof serverId === 'object' && serverId._id) {
       serverIdString = serverId._id;
     }
     
-    // Отправляем запрос на обновление статистики
-    const response = await axios.post(`${API_URL}/servers/analytics/update`, {
-      serverId: serverIdString,
-      status: status, // 'connected' или 'disconnected'
-      clientId: clientId
-    }, {
-      headers: {
-        Authorization: `Bearer ${authToken}`,
-        'Content-Type': 'application/json'
-      }
-    });
+    // Send request to update connection statistics with retry logic
+    let retries = 0;
+    const maxRetries = 3;
+    const baseDelay = 1000; // 1 second base delay
     
-    if (response.status === 200) {
-      console.log('Статистика успешно обновлена');
-      return { success: true };
-    } else {
-      console.error('Ошибка при обновлении статистики:', response.status, response.data);
-      return { 
-        success: false, 
-        error: `Ошибка сервера: ${response.status}`
-      };
+    while (retries <= maxRetries) {
+      try {
+        const response = await axios.post(`${API_URL}/servers/analytics/update`, {
+          serverId: serverIdString,
+          status: status, // 'connected' or 'disconnected'
+          clientId: clientId
+        }, {
+          headers: {
+            Authorization: `Bearer ${authToken}`,
+            'Content-Type': 'application/json'
+          },
+          timeout: 5000 // 5 second timeout
+        });
+        
+        if (response.status === 200) {
+          console.log('Статистика успешно обновлена');
+          return { success: true };
+        } else {
+          console.error('Ошибка при обновлении статистики:', response.status, response.data);
+          return { 
+            success: false, 
+            error: `Ошибка сервера: ${response.status}` 
+          };
+        }
+      } catch (error) {
+        retries++;
+        
+        // Check if we should retry
+        if (retries <= maxRetries) {
+          const retryDelay = baseDelay * Math.pow(2, retries) + Math.random() * 1000;
+          console.log(`Ошибка при обновлении статуса соединения (попытка ${retries}/${maxRetries}). Повтор через ${Math.round(retryDelay/1000)} сек...`);
+          await new Promise(resolve => setTimeout(resolve, retryDelay));
+          continue;
+        }
+        
+        // If it's a server error (404, etc), log it but don't fail the connection
+        if (error.response) {
+          console.error(`Ошибка API при обновлении статуса соединения (${error.response.status}): ${error.message}`);
+          // For 404 errors, make a note that we should implement the endpoint
+          if (error.response.status === 404) {
+            console.warn('Эндпоинт /api/servers/analytics/update не найден на сервере. Убедитесь, что API обновлен до последней версии.');
+          }
+          // Return partial success - we don't want to fail the connection just because stats updates failed
+          return { 
+            success: true, 
+            warning: `Не удалось обновить статистику: ${error.message}`,
+            serverError: error.response.status
+          };
+        }
+        
+        // Network errors shouldn't fail the connection
+        console.error('Ошибка сети при обновлении статистики подключения:', error);
+        return { 
+          success: true, 
+          warning: 'Не удалось обновить статистику из-за проблем с сетью' 
+        };
+      }
     }
-  } catch (error) {
-    console.error('Ошибка при обновлении статистики подключения:', error);
+    
+    // If we've exhausted all retries
     return { 
-      success: false, 
-      error: `Ошибка: ${error.message || 'Неизвестная ошибка'}`
+      success: true, 
+      warning: `Не удалось обновить статистику после ${maxRetries} попыток, но соединение работает` 
+    };
+  } catch (error) {
+    console.error('Необработанная ошибка при обновлении статистики подключения:', error);
+    // Don't let statistics errors affect the connection
+    return { 
+      success: true, 
+      error: `Ошибка: ${error.message || 'Неизвестная ошибка'}`,
+      critical: false
     };
   }
 }
@@ -1001,25 +1338,25 @@ async function getServerAnalytics() {
       console.error('Ошибка при запросе аналитики серверов:', response.status);
       return { 
         success: false, 
-        error: `Ошибка сервера: ${response.status}`
+        error: `Ошибка сервера: ${response.status}` 
       };
     }
   } catch (error) {
     console.error('Не удалось получить аналитику серверов:', error);
     return { 
       success: false, 
-      error: `Ошибка при запросе аналитики: ${error.message || 'Неизвестная ошибка'}`
+      error: `Ошибка при запросе аналитики: ${error.message || 'Неизвестная ошибка'}` 
     };
   }
 }
 
-// Обработчик для скачивания конфигурации VPN
-ipcMain.handle('download-config', async (event, params) => {
+// Function for downloading VPN configuration with improved rate limiting handling
+async function downloadVPNConfig(serverId, configType) {
   try {
-    console.log('Запрос на скачивание конфигурации VPN:', params);
+    console.log(`Запрос на скачивание конфигурации: ${serverId}, тип: ${configType}`);
     
     // Проверяем наличие необходимых параметров
-    if (!params || !params.serverId || !params.configType) {
+    if (!serverId || !configType) {
       console.error('Ошибка: Не указан ID сервера или тип конфигурации');
       return { 
         success: false, 
@@ -1028,9 +1365,16 @@ ipcMain.handle('download-config', async (event, params) => {
     }
     
     // Преобразуем serverId в строку, если это объект
-    let serverIdStr = params.serverId;
-    if (typeof params.serverId === 'object') {
-      serverIdStr = params.serverId._id || params.serverId.id || JSON.stringify(params.serverId);
+    let serverIdStr = serverId;
+    if (typeof serverId === 'object') {
+      serverIdStr = serverId._id || serverId.id;
+      if (!serverIdStr) {
+        console.error('Ошибка: serverId не содержит _id или id');
+        return {
+          success: false,
+          error: 'Некорректный ID сервера для скачивания конфигурации'
+        };
+      }
       console.log('Преобразован ID сервера из объекта в строку:', serverIdStr);
     }
     
@@ -1043,53 +1387,180 @@ ipcMain.handle('download-config', async (event, params) => {
       };
     }
     
-    console.log(`Скачивание конфигурации для сервера ${serverIdStr}, тип: ${params.configType}`);
+    // Выбираем правильный URL эндпоинта на основе типа конфигурации
+    let endpointSuffix;
+    let configFileSuffix;
     
-    // Формируем URL для запроса конфигурации
-    const configUrl = `${API_URL}/servers/${serverIdStr}/config/${params.configType}`;
-    console.log('URL запроса конфигурации:', configUrl);
-    
-    // Отправляем запрос на получение конфигурации
-    const response = await axios.get(configUrl, {
-      headers: {
-        Authorization: `Bearer ${authToken}`
-      },
-      responseType: 'text' // Важно для получения текстового файла
-    });
-    
-    if (response.status !== 200) {
-      console.error('Ошибка при получении конфигурации:', response.status);
-      return { 
-        success: false, 
-        error: `Ошибка сервера: ${response.status}` 
+    if (configType === 'fullVpn') {
+      endpointSuffix = 'vpn-config';
+      configFileSuffix = 'fullVpn';
+    } else if (configType === 'antizapret') {
+      endpointSuffix = 'antizapret-config';
+      configFileSuffix = 'antizapret';
+    } else {
+      console.error(`Неизвестный тип конфигурации: ${configType}`);
+      return {
+        success: false,
+        error: `Неизвестный тип конфигурации: ${configType}`
       };
     }
     
-    // Получаем содержимое файла конфигурации
-    const configContent = response.data;
+    console.log(`Скачивание конфигурации для сервера ${serverIdStr}, тип: ${configType}`);
     
-    // Создаем папку для конфигураций, если её нет
+    // Формируем URL для запроса конфигурации
+    const configUrl = `${API_URL}/servers/${serverIdStr}/${endpointSuffix}`;
+
+    // Проверка локального кэша конфигураций
     const configDir = path.join(app.getPath('userData'), 'configs');
-    if (!fs.existsSync(configDir)) {
-      fs.mkdirSync(configDir, { recursive: true });
-      console.log('Создана директория для конфигураций:', configDir);
+    const cachedConfigFilename = `${serverIdStr}_${configFileSuffix}.ovpn`;
+    const cachedConfigPath = path.join(configDir, cachedConfigFilename);
+    
+    // Проверяем наличие локального кэша конфигурации
+    try {
+      if (fs.existsSync(configDir) && fs.existsSync(cachedConfigPath)) {
+        // Проверяем время последнего изменения файла
+        const stats = fs.statSync(cachedConfigPath);
+        const fileModTime = new Date(stats.mtime);
+        const now = new Date();
+        const fileAgeHours = (now - fileModTime) / (1000 * 60 * 60);
+        
+        // Если файл был создан менее 24 часов назад, используем кэшированный файл
+        if (fileAgeHours < 24) {
+          console.log(`Используем кэшированную конфигурацию (возраст: ${Math.round(fileAgeHours)} часов): ${cachedConfigPath}`);
+          return {
+            success: true,
+            configPath: cachedConfigPath,
+            configFileName: cachedConfigFilename,
+            fromCache: true
+          };
+        } else {
+          console.log(`Кэшированная конфигурация устарела (${Math.round(fileAgeHours)} часов), загружаем новую`);
+        }
+      }
+    } catch (cacheError) {
+      console.error('Ошибка при проверке кэша конфигурации:', cacheError);
+      // Продолжаем загрузку с сервера при ошибке проверки кэша
     }
     
-    // Формируем имя файла конфигурации
-    const configFileName = `${serverIdStr}_${params.configType}.ovpn`;
-    const configPath = path.join(configDir, configFileName);
+    // Добавляем механизм задержки и повтора при ошибках
+    const maxRetries = 3;
+    let retryCount = 0;
+    let retryDelay = 2000; // Начальная задержка 2 секунды
     
-    // Сохраняем файл конфигурации
-    fs.writeFileSync(configPath, configContent, 'utf8');
-    console.log('Конфигурация успешно сохранена:', configPath);
+    while (retryCount <= maxRetries) {
+      try {
+        console.log(`Попытка загрузки конфигурации ${retryCount > 0 ? `(попытка ${retryCount}/${maxRetries})` : ''}: ${configUrl}`);
+        
+        // Отправляем запрос на получение конфигурации с более долгим таймаутом
+        const response = await axios.get(configUrl, {
+          headers: {
+            Authorization: `Bearer ${authToken}`
+          },
+          responseType: 'text',
+          timeout: 10000 // 10 seconds timeout
+        });
+        
+        if (response.status !== 200) {
+          throw new Error(`Ошибка сервера: ${response.status}`);
+        }
+        
+        // Получаем содержимое файла конфигурации
+        const configContent = response.data;
+        
+        // Создаем папку для конфигураций, если её нет
+        if (!fs.existsSync(configDir)) {
+          fs.mkdirSync(configDir, { recursive: true });
+          console.log('Создана директория для конфигураций:', configDir);
+        }
+        
+        // Сохраняем файл конфигурации
+        fs.writeFileSync(cachedConfigPath, configContent, 'utf8');
+        console.log('Конфигурация успешно сохранена:', cachedConfigPath);
+        
+        return {
+          success: true,
+          configPath: cachedConfigPath,
+          configFileName: cachedConfigFilename
+        };
+      } catch (error) {
+        retryCount++;
+        
+        // Обработка ошибки превышения лимита запросов (429)
+        if (error.response && error.response.status === 429) {
+          // Определяем время ожидания из заголовка Retry-After или используем экспоненциальную задержку
+          let waitTime;
+          if (error.response.headers && error.response.headers['retry-after']) {
+            waitTime = parseInt(error.response.headers['retry-after'], 10) * 1000;
+          } else {
+            waitTime = retryDelay * Math.pow(2, retryCount - 1); // Экспоненциальное увеличение задержки
+          }
+          
+          console.log(`Сервер ограничивает запросы (429). Ожидание ${Math.round(waitTime/1000)} секунд...`);
+          
+          // Показываем уведомление пользователю
+          if (mainWindow) {
+            mainWindow.webContents.send('rate-limit-warning', {
+              message: `Слишком много запросов. Повторная попытка через ${Math.round(waitTime/1000)} секунд...`,
+              waitTime: Math.round(waitTime/1000)
+            });
+          }
+          
+          // Если есть кэшированный файл, используем его даже если он устарел
+          try {
+            if (fs.existsSync(cachedConfigPath)) {
+              console.log(`Используем существующий кэшированный файл из-за ограничения запросов:`, cachedConfigPath);
+              return {
+                success: true,
+                configPath: cachedConfigPath,
+                configFileName: cachedConfigFilename,
+                fromCache: true,
+                rateLimited: true
+              };
+            }
+          } catch (cacheError) {
+            console.error('Ошибка при проверке кэшированного файла:', cacheError);
+          }
+          
+          // Ожидаем указанное время перед следующей попыткой
+          await new Promise(resolve => setTimeout(resolve, waitTime));
+          continue;
+        }
+        
+        // Если это последняя попытка или ошибка не связана с превышением лимита, выбрасываем её
+        if (retryCount > maxRetries) {
+          throw error;
+        }
+        
+        // Для других ошибок повторяем с увеличивающейся задержкой
+        const waitTime = retryDelay * Math.pow(1.5, retryCount - 1);
+        console.log(`Ошибка при загрузке конфигурации, повторная попытка через ${Math.round(waitTime/1000)} сек... (${retryCount}/${maxRetries})`);
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+      }
+    }
     
-    return {
-      success: true,
-      configPath: configPath,
-      configFileName: configFileName
-    };
+    throw new Error(`Превышено максимальное количество попыток (${maxRetries})`);
   } catch (error) {
     console.error('Ошибка при скачивании конфигурации:', error);
+    
+    // Проверяем, есть ли кэшированный файл для аварийного использования
+    try {
+      const configDir = path.join(app.getPath('userData'), 'configs');
+      const cachedConfigFilename = `${typeof serverId === 'object' ? (serverId._id || serverId.id) : serverId}_${configType === 'fullVpn' ? 'fullVpn' : 'antizapret'}.ovpn`;
+      const cachedConfigPath = path.join(configDir, cachedConfigFilename);
+      
+      if (fs.existsSync(cachedConfigPath)) {
+        console.log(`Используем существующий кэшированный файл из-за ошибки загрузки:`, cachedConfigPath);
+        return {
+          success: true,
+          configPath: cachedConfigPath,
+          configFileName: cachedConfigFilename,
+          fromCache: true,
+          warning: 'Используется кэшированная конфигурация из-за ошибки обновления'
+        };
+      }
+    } catch (cacheError) {
+      console.error('Ошибка при проверке кэшированного файла:', cacheError);
+    }
     
     // Подробная информация об ошибке для отладки
     let errorDetails = 'Неизвестная ошибка';
@@ -1123,7 +1594,7 @@ ipcMain.handle('download-config', async (event, params) => {
       error: errorDetails
     };
   }
-});
+}
 
 // Обработчик авторизации пользователя
 ipcMain.handle('login', async (event, credentials) => {
@@ -1139,11 +1610,28 @@ ipcMain.handle('login', async (event, credentials) => {
       };
     }
     
-    // Отправляем запрос на сервер для авторизации
+    // Отправляем запрос на сервер для авторизации с использованием функции makeApiRequest
     console.log('Отправка запроса авторизации на сервер...');
-    const response = await axios.post(`${API_URL}/auth/login`, {
-      email: credentials.email,
-      activationKey: credentials.password
+    
+    // Уведомляем пользователя о начале процесса авторизации
+    if (mainWindow) {
+      mainWindow.webContents.send('auth-progress', { 
+        step: 'start',
+        message: 'Авторизация...' 
+      });
+    }
+    
+    const response = await makeApiRequest({
+      method: 'post',
+      url: `${API_URL}/auth/user/token`,
+      data: {
+        email: credentials.email,
+        activationKey: credentials.password
+      },
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      maxRetries: 3 // Максимально 3 попытки при ошибках
     });
     
     console.log('Ответ сервера авторизации:', response.status);
@@ -1216,6 +1704,8 @@ ipcMain.handle('login', async (event, credentials) => {
         errorMessage = 'Неверный email или ключ активации';
       } else if (error.response.status === 404) {
         errorMessage = 'Сервер авторизации недоступен';
+      } else if (error.response.status === 429) {
+        errorMessage = 'Слишком много попыток авторизации. Пожалуйста, подождите несколько минут и попробуйте снова.';
       } else {
         errorMessage = `Ошибка сервера: ${error.response.status}`;
       }
@@ -1232,6 +1722,631 @@ ipcMain.handle('login', async (event, credentials) => {
     return { 
       success: false, 
       error: errorMessage
+    };
+  }
+});
+
+// Обработчик для получения списка серверов
+ipcMain.handle('get-servers', async () => {
+  try {
+    console.log('Получение списка серверов...');
+    
+    // Проверяем наличие токена авторизации
+    if (!authToken) {
+      console.log('Отсутствует токен авторизации. Возвращаем authRequired');
+      return { 
+        success: false, 
+        authRequired: true, 
+        error: 'Требуется авторизация' 
+      };
+    }
+    
+    // Запрашиваем список серверов
+    const serverList = await getServerList();
+    
+    // Проверяем на ошибки
+    if (!serverList.servers || serverList.error) {
+      console.error('Ошибка при получении списка серверов:', serverList.error);
+      // Если есть запасные серверы, возвращаем их
+      const fallbackServers = getFallbackServers();
+      return { 
+        success: false, 
+        error: serverList.error || 'Не удалось получить список серверов',
+        servers: fallbackServers
+      };
+    }
+    
+    return { success: true, servers: serverList.servers };
+  } catch (error) {
+    console.error('Ошибка при получении списка серверов:', error);
+    return { 
+      success: false, 
+      error: error.message 
+    };
+  }
+});
+
+// Обработчик для получения аналитики серверов
+ipcMain.handle('get-server-analytics', async () => {
+  try {
+    console.log('Запрос аналитики серверов...');
+    
+    // Проверяем наличие токена авторизации
+    if (!authToken) {
+      console.log('Отсутствует токен авторизации для получения аналитики серверов');
+      return { 
+        success: false, 
+        error: 'Требуется авторизация для получения аналитики' 
+      };
+    }
+    
+    // Запрашиваем аналитику серверов с сервера или из кэша
+    const analyticData = await getServerAnalytics();
+    
+    if (analyticData.success && analyticData.analytics) {
+      return {
+        success: true,
+        analytics: analyticData.analytics
+      };
+    } else {
+      console.warn('Не удалось получить аналитику серверов:', analyticData.error);
+      
+      // Возвращаем текущие локальные данные, если они есть
+      if (serverAnalytics && serverAnalytics.length > 0) {
+        return {
+          success: true,
+          analytics: serverAnalytics,
+          warning: 'Данные из локального кэша'
+        };
+      }
+      
+      return { 
+        success: false, 
+        error: analyticData.error || 'Не удалось получить аналитику серверов' 
+      };
+    }
+  } catch (error) {
+    console.error('Ошибка при получении аналитики серверов:', error);
+    return { 
+      success: false, 
+      error: error.message 
+    };
+  }
+});
+
+// Обработчик для обновления статуса подключения к серверу
+ipcMain.handle('update-connection-status', async (event, params) => {
+  try {
+    console.log('Обновление статуса подключения к серверу:', params);
+    
+    if (!params || !params.serverId || !params.status) {
+      return { 
+        success: false, 
+        error: 'Неверные параметры: требуется serverId и status' 
+      };
+    }
+    
+    // Обновляем статистику подключения на сервере
+    const updateResult = await updateServerConnectionStatus(params.serverId, params.status);
+    
+    return updateResult;
+  } catch (error) {
+    console.error('Ошибка при обновлении статуса подключения к серверу:', error);
+    return { 
+      success: false, 
+      error: error.message 
+    };
+  }
+});
+
+// Обработчик для проверки состояния авторизации
+ipcMain.handle('check-auth-state', () => {
+  return {
+    isAuthenticated: authState.isAuthenticated,
+    user: authState.user
+  };
+});
+
+// Обработчик для получения информации о пользователе
+ipcMain.handle('get-user-info', async () => {
+  try {
+    // Если есть информация о пользователе в состоянии авторизации
+    if (authState.user) {
+      return authState.user;
+    }
+    
+    // Если есть токен авторизации, пытаемся получить информацию о пользователе
+    if (authToken) {
+      try {
+        // Здесь может быть запрос к серверу для получения информации о пользователе
+        // На данном этапе просто возвращаем базовую информацию из токена
+        return {
+          email: authState.user?.email || 'Пользователь'
+        };
+      } catch (error) {
+        console.error('Ошибка при получении информации о пользователе:', error);
+      }
+    }
+    
+    return null;
+  } catch (error) {
+    console.error('Ошибка при получении информации о пользователе:', error);
+    return null;
+  }
+});
+
+// Обработчик для загрузки сохраненного токена авторизации
+ipcMain.handle('load-saved-auth-token', async () => {
+  try {
+    const loaded = loadSavedAuthToken();
+    return { 
+      success: loaded,
+      hasToken: !!authToken
+    };
+  } catch (error) {
+    console.error('Ошибка при загрузке сохраненного токена:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Обработчик для сохранения учетных данных
+ipcMain.handle('save-auth-credentials', async (event, credentials) => {
+  try {
+    console.log('Сохранение учетных данных...');
+    
+    if (!credentials || !credentials.email) {
+      return { success: false, error: 'Недостаточно данных для сохранения' };
+    }
+    
+    // Сохраняем в файл
+    const credentialsPath = path.join(app.getPath('userData'), 'credentials.json');
+    
+    // Проверяем, нужно ли сохранять пароль
+    const dataToSave = {
+      email: credentials.email,
+      timestamp: new Date().toISOString()
+    };
+    
+    // Если установлен флаг "запомнить меня" и есть ключ, сохраняем его
+    if (credentials.remember && credentials.key) {
+      dataToSave.key = credentials.key;
+    }
+    
+    fs.writeFileSync(credentialsPath, JSON.stringify(dataToSave));
+    console.log('Учетные данные сохранены в:', credentialsPath);
+    
+    return { success: true };
+  } catch (error) {
+    console.error('Ошибка при сохранении учетных данных:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Обработчик для выхода из системы
+ipcMain.handle('logout', async () => {
+  try {
+    console.log('Выход из системы...');
+    
+    // Очищаем токен авторизации
+    authToken = null;
+    
+    // Очищаем состояние авторизации
+    clearAuthState();
+    
+    // Удаляем файл с сохраненным токеном
+    try {
+      const tokenPath = path.join(app.getPath('userData'), 'auth.json');
+      if (fs.existsSync(tokenPath)) {
+        fs.unlinkSync(tokenPath);
+        console.log('Файл с сохраненным токеном удален');
+      }
+    } catch (fileError) {
+      console.error('Ошибка при удалении файла с токеном:', fileError);
+    }
+    
+    return { success: true };
+  } catch (error) {
+    console.error('Ошибка при выходе из системы:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Обработчик для проверки статуса подключения
+ipcMain.handle('check-vpn-status', async () => {
+  try {
+    console.log('Проверка статуса подключения VPN...');
+    
+    // Здесь обычно была бы логика проверки состояния VPN подключения
+    // Возвращаем текущее состояние из глобальной переменной
+    const status = {
+      connected: isConnected,
+      server: selectedServer
+    };
+    
+    return status;
+  } catch (error) {
+    console.error('Ошибка при проверке статуса подключения:', error);
+    return { 
+      connected: false, 
+      error: error.message 
+    };
+  }
+});
+
+// Обработчик для подключения к VPN
+if (!ipcMain.eventNames().includes('connect-vpn')) {
+  ipcMain.handle('connect-vpn', async (event, params) => {
+    try {
+      console.log('Запрос на подключение к VPN:', params);
+      
+      if (!params || !params.serverId) {
+        return {
+          success: false,
+          message: 'Не указан ID сервера для подключения'
+        };
+      }
+      
+      // Получаем конфигурацию сервера если её ещё нет
+      let configPath;
+      
+      if (params.configPath) {
+        configPath = params.configPath;
+      } else {
+        // Используем выделенную функцию для скачивания конфигурации
+        const configType = params.connectionType || 'fullVpn';
+        console.log(`Скачивание конфигурации для подключения (тип: ${configType})...`);
+        
+        const configResult = await downloadVPNConfig(params.serverId, configType);
+        
+        if (!configResult.success || !configResult.configPath) {
+          console.error('Ошибка при получении конфигурации:', configResult.error);
+          return {
+            success: false,
+            message: `Ошибка при получении конфигурации: ${configResult.error || 'Неизвестная ошибка'}`
+          };
+        }
+        
+        configPath = configResult.configPath;
+      }
+      
+      // Находим сервер по ID
+      const server = await findServerById(params.serverId);
+      
+      // Здесь должен быть код для реального подключения к VPN,
+      // используя openvpn и configPath
+      console.log(`Подключаемся к серверу ${params.serverId} (${params.connectionType})...`);
+      console.log(`Загрузка конфигурации VPN...`);
+      
+      // Запуск OpenVPN с указанной конфигурацией
+      const openVpnPath = getOpenVpnPath();
+      if (!openVpnPath) {
+        return {
+          success: false,
+          message: 'Не найден исполняемый файл OpenVPN'
+        };
+      }
+      
+      // Запускаем процесс OpenVPN
+      vpnProcess = spawn(
+        openVpnPath,
+        ['--config', configPath],
+        { windowsHide: true }
+      );
+      
+      // Обработка вывода OpenVPN
+      vpnProcess.stdout.on('data', (data) => {
+        const output = data.toString().trim();
+        console.log(`OpenVPN вывод: ${output}`);
+        
+        // Проверяем признаки успешного подключения
+        if (output.includes('Initialization Sequence Completed') || 
+            output.includes('Sequence Completed')) {
+          console.log('Обнаружено успешное подключение VPN');
+          
+          // Вместо простого обновления статуса теперь используем функцию с проверкой
+          updateConnectionStatusWithValidation(true, server)
+            .then(validationResult => {
+              console.log('Результат проверки подключения:', validationResult);
+              
+              // Отправляем обновление статуса в рендерер
+              if (mainWindow) {
+                mainWindow.webContents.send('vpn-connected', {
+                  server: server,
+                  validated: validationResult.verified
+                });
+              }
+              
+              // Обновляем статистику на сервере
+              updateServerConnectionStatus(params.serverId, 'connected')
+                .catch(err => console.error('Ошибка при обновлении статистики подключения:', err));
+            })
+            .catch(err => {
+              console.error('Ошибка при проверке подключения:', err);
+            });
+        }
+      });
+      
+      vpnProcess.stderr.on('data', (data) => {
+        console.error(`OpenVPN ошибка: ${data.toString().trim()}`);
+      });
+      
+      vpnProcess.on('close', (code) => {
+        console.log(`Процесс OpenVPN завершен с кодом: ${code}`);
+        
+        // Обновляем состояние при отключении
+        updateConnectionStatusWithValidation(false, null);
+        vpnProcess = null;
+        
+        // Отправляем обновление статуса в рендерер
+        if (mainWindow) {
+          mainWindow.webContents.send('vpn-disconnected', { code });
+        }
+        
+        // Обновляем статистику на сервере
+        if (selectedServer) {
+          updateServerConnectionStatus(selectedServer._id, 'disconnected')
+            .catch(err => console.error('Ошибка при обновлении статистики отключения:', err));
+        }
+      });
+      
+      // Возвращаем начальный статус запуска процесса
+      return {
+        success: true,
+        message: 'Подключение инициировано',
+        server: server
+      };
+    } catch (error) {
+      console.error('Ошибка при подключении к VPN:', error);
+      return {
+        success: false,
+        message: error.message
+      };
+    }
+  });
+}
+
+// Функция для поиска сервера по ID
+async function findServerById(serverId) {
+  try {
+    if (!serverId) return null;
+    
+    // Получаем список серверов
+    const serverList = await getServerList();
+    
+    if (serverList.success && serverList.servers && serverList.servers.length > 0) {
+      return serverList.servers.find(server => server._id === serverId);
+    } else if (serverList.servers && serverList.servers.length > 0) {
+      // Если успех не указан, но есть серверы
+      return serverList.servers.find(server => server._id === serverId);
+    }
+    
+    // Если не удалось получить серверы, возвращаем null
+    return null;
+  } catch (error) {
+    console.error('Ошибка при поиске сервера по ID:', error);
+    return null;
+  }
+}
+
+// Обработчик для отключения от VPN
+ipcMain.handle('disconnect-vpn', async () => {
+  try {
+    console.log('Запрос на отключение от VPN');
+    
+    return disconnectVPN()
+      ? { success: true, message: 'Отключение выполнено успешно' }
+      : { success: false, message: 'Ошибка при отключении VPN' };
+  } catch (error) {
+    console.error('Ошибка при отключении от VPN:', error);
+    return {
+      success: false,
+      message: error.message
+    };
+  }
+});
+
+// Функция для инициализации уникального идентификатора клиента
+async function initializeClientId() {
+  try {
+    const clientIdPath = path.join(app.getPath('userData'), 'clientId.json');
+    
+    if (fs.existsSync(clientIdPath)) {
+      try {
+        const data = JSON.parse(fs.readFileSync(clientIdPath, 'utf8'));
+        if (data && data.clientId) {
+          console.log('Загружен существующий clientId:', data.clientId);
+          clientId = data.clientId;
+          return;
+        }
+      } catch (parseError) {
+        console.error('Ошибка при чтении существующего clientId:', parseError);
+        // Продолжаем и создаем новый ID
+      }
+    }
+    
+    // Генерируем новый clientId, включая машинную информацию для уникальности
+    const machineId = os.hostname() + '-' + os.platform() + '-' + os.arch();
+    clientId = `vpn-${Date.now()}-${machineId}-${Math.random().toString(36).substr(2, 9)}`;
+    console.log('Сгенерирован новый clientId:', clientId);
+    
+    // Сохраняем clientId в файл
+    fs.writeFileSync(clientIdPath, JSON.stringify({ 
+      clientId,
+      createdAt: new Date().toISOString(),
+      machine: machineId
+    }), 'utf8');
+    console.log('clientId сохранен в:', clientIdPath);
+  } catch (error) {
+    console.error('Ошибка при инициализации clientId:', error);
+    // В случае ошибки создаем временный ID в памяти
+    clientId = `temp-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    console.log('Создан временный clientId в памяти:', clientId);
+  }
+}
+
+// Function to verify and fix VPN routing after connection
+async function verifyAndFixVpnRouting() {
+  if (!isConnected || !selectedServer) return false;
+
+  try {
+    console.log('Проверка и корректировка маршрутизации VPN...');
+
+    // First check if our connection verification passes
+    const isConnected = await verifyVpnConnection();
+    if (!isConnected) {
+      console.error('Проблема с VPN соединением: ping-тест не прошел');
+      
+      // Try to reset routing table on Windows
+      if (process.platform === 'win32') {
+        console.log('Попытка восстановления таблицы маршрутизации...');
+        
+        // Create a batch script to fix routing issues
+        const tempBatchPath = path.join(os.tmpdir(), 'fix-vpn-routes.bat');
+        const batchContent = `
+@echo off
+echo Восстановление маршрутизации VPN...
+ipconfig /release
+ipconfig /renew
+ipconfig /flushdns
+netsh interface ip delete arpcache
+netsh winsock reset catalog
+route print
+echo Готово.
+`;
+        
+        fs.writeFileSync(tempBatchPath, batchContent);
+        
+        // Run the batch file as administrator
+        const cmdProcess = spawn('powershell', [
+          '-Command', 
+          `Start-Process -FilePath "${tempBatchPath}" -Verb RunAs -Wait`
+        ]);
+        
+        // Wait for the process to finish
+        await new Promise((resolve) => {
+          cmdProcess.on('close', (code) => {
+            console.log(`Процесс восстановления маршрутизации завершен с кодом ${code}`);
+            resolve();
+          });
+        });
+        
+        // Try to verify connection again after fixing
+        const isFixedConnected = await verifyVpnConnection();
+        if (isFixedConnected) {
+          console.log('Маршрутизация успешно восстановлена, VPN теперь работает');
+          return true;
+        } else {
+          console.error('Не удалось восстановить маршрутизацию, VPN по-прежнему не работает');
+          
+          // Notify the user
+          if (mainWindow) {
+            mainWindow.webContents.send('vpn-routing-error', {
+              message: 'Проблема с маршрутизацией VPN. Попробуйте переподключиться или перезапустить приложение.'
+            });
+          }
+          return false;
+        }
+      } else {
+        // For non-Windows platforms
+        console.log('Проверка маршрутизации на этой платформе не поддерживается');
+        return false;
+      }
+    }
+    
+    console.log('Маршрутизация VPN в порядке');
+    return true;
+  } catch (error) {
+    console.error('Ошибка при проверке маршрутизации VPN:', error);
+    return false;
+  }
+}
+
+// Function to get OpenVPN installation path
+function getOpenVpnPath() {
+  // Check common installation paths for Windows
+  if (process.platform === 'win32') {
+    const possiblePaths = [
+      'C:\\Program Files\\OpenVPN\\bin\\openvpn.exe',
+      'C:\\Program Files (x86)\\OpenVPN\\bin\\openvpn.exe'
+    ];
+    
+    for (const path of possiblePaths) {
+      if (fs.existsSync(path)) {
+        return path;
+      }
+    }
+  }
+  
+  // Default fallback (should not reach this in production)
+  return null;
+}
+
+// Function to disconnect from VPN
+function disconnectVPN() {
+  if (vpnProcess) {
+    try {
+      console.log('Отключение VPN...');
+      
+      // Kill the OpenVPN process
+      if (process.platform === 'win32') {
+        // On Windows we need to use taskkill to force kill the process tree
+        exec(`taskkill /F /T /PID ${vpnProcess.pid}`, (error) => {
+          if (error) {
+            console.error('Ошибка при завершении процесса OpenVPN:', error);
+          } else {
+            console.log('Процесс OpenVPN успешно завершен');
+          }
+        });
+      } else {
+        vpnProcess.kill('SIGTERM');
+      }
+      
+      // Update connection status
+      updateConnectionStatus(false, null);
+      
+      // Update server statistics
+      if (selectedServer) {
+        updateServerConnectionStatus(selectedServer._id, 'disconnected')
+          .catch(err => console.error('Ошибка при обновлении статистики отключения:', err));
+      }
+      
+      vpnProcess = null;
+      return true;
+    } catch (error) {
+      console.error('Ошибка при отключении VPN:', error);
+      return false;
+    }
+  } else {
+    console.log('VPN не подключен, отключение не требуется');
+    return true;
+  }
+}
+
+// Handler for fixing VPN routing problems
+ipcMain.handle('fix-vpn-routing', async () => {
+  try {
+    console.log('Запрос на исправление маршрутизации VPN...');
+    
+    if (!isConnected) {
+      return {
+        success: false,
+        message: 'VPN не подключен'
+      };
+    }
+    
+    const result = await verifyAndFixVpnRouting();
+    
+    return {
+      success: result,
+      message: result 
+        ? 'Маршрутизация VPN успешно исправлена' 
+        : 'Не удалось исправить маршрутизацию VPN'
+    };
+  } catch (error) {
+    console.error('Ошибка при исправлении маршрутизации VPN:', error);
+    return {
+      success: false,
+      message: `Ошибка: ${error.message}`
     };
   }
 });

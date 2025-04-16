@@ -1,9 +1,16 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
+import 'package:flutter/foundation.dart' show kReleaseMode;
 import '../models/server_model.dart';
 
 class ApiService {
-  static const String _apiUrl = 'https://api.vpnservice.com'; // Заменить на реальный URL
+  // Используем разные URL в зависимости от режима (релиз или разработка)
+  static String get _apiUrl {
+    return kReleaseMode
+        ? 'http://45.147.178.200:3000/api'  // Продакшен сервер
+        : 'http://127.0.0.1:3000/api';      // Локальный сервер для разработки
+  }
+  
   final String? _authToken;
   
   ApiService({String? authToken}) : _authToken = authToken;
@@ -93,4 +100,4 @@ class ApiService {
       return false;
     }
   }
-} 
+}

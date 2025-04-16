@@ -413,6 +413,16 @@ const ServersPage = () => {
     { field: 'country', headerName: 'Страна', width: 100 },
     { field: 'city', headerName: 'Город', width: 100 },
     { 
+      field: 'activeConnections', 
+      headerName: 'Подключено пользователей', 
+      width: 180,
+      renderCell: (params) => (
+        <Typography variant="body2" sx={{ fontWeight: 'bold' }}>
+          {params.value || 0}
+        </Typography>
+      )
+    },
+    { 
       field: 'isActive', 
       headerName: 'Статус', 
       width: 100,
@@ -868,4 +878,4 @@ const ServersPage = () => {
   );
 };
 
-export default ServersPage; 
+export default ServersPage;

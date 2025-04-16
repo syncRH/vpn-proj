@@ -1,6 +1,7 @@
 import axios from 'axios';
+import { API_CONFIG } from '../config/api.config';
 
-const API_URL = '/api/auth';
+const API_URL = `${API_CONFIG.baseUrl}/api/auth`;
 
 // Вход администратора
 const login = async (username, password) => {
@@ -21,4 +22,4 @@ const authService = {
   register
 };
 
-export default authService; 
+export default authService;
