@@ -240,6 +240,6 @@ app.use((err, req, res, next) => {
 });
 
 // Запуск сервера
-app.listen(PORT, () => {
-  logger.info(`Server is running in ${NODE_ENV} mode on port ${PORT}`);
+app.listen(PORT, '0.0.0.0', () => {
+  logger.info(`Server is running in ${NODE_ENV} mode on port ${PORT} (0.0.0.0)`);
 });

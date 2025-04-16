@@ -7,6 +7,12 @@ const os = require('os');
 const electron = require('electron');
 const https = require('https');
 const sudo = require('sudo-prompt');
+const { autoUpdater } = require('electron-updater');
+
+// Логирование для автообновления
+autoUpdater.logger = require('electron').log;
+autoUpdater.logger.transports.file.level = 'info';
+console.log('Логирование автообновления настроено в:', autoUpdater.logger.transports.file.findLogPath());
 
 // Инициализируем временное хранилище для авторизации (будет заменено на electron-store позже)
 let authStateStore = {
@@ -22,8 +28,28 @@ const API_URL = isDevelopment
   ? 'http://127.0.0.1:3000/api'  // Локальный адрес для разработки
   : 'http://45.147.178.200:3000/api'; // Боевой сервер для продакшена
 
-// URL для скачивания OpenVPN
-const OPENVPN_DOWNLOAD_URL = 'https://swupdate.openvpn.org/community/releases/OpenVPN-2.5.8-I601-amd64.msi';
+// URL для скачивания OpenVPN с учетом архитектуры процессора
+function getOpenVpnDownloadUrl() {
+  // Определяем архитектуру системы
+  const arch = os.arch();
+  console.log(`Обнаружена архитектура системы: ${arch}`);
+  
+  // Выбираем соответствующую версию OpenVPN
+  if (arch === 'x64' || arch === 'amd64') {
+    return 'https://swupdate.openvpn.org/community/releases/OpenVPN-2.5.8-I601-amd64.msi';
+  } else if (arch === 'ia32' || arch === 'x86') {
+    return 'https://swupdate.openvpn.org/community/releases/OpenVPN-2.5.8-I601-x86.msi';
+  } else if (arch === 'arm64') {
+    // Для ARM64 архитектуры (Windows на ARM)
+    return 'https://swupdate.openvpn.org/community/releases/OpenVPN-2.5.8-I601-arm64.msi';
+  } else {
+    // Если архитектура не определена, используем x86 как наиболее совместимую
+    console.log(`Неизвестная архитектура ${arch}, используем x86 версию OpenVPN`);
+    return 'https://swupdate.openvpn.org/community/releases/OpenVPN-2.5.8-I601-x86.msi';
+  }
+}
+
+const OPENVPN_DOWNLOAD_URL = getOpenVpnDownloadUrl();
 const OPENVPN_INSTALLER_PATH = path.join(os.tmpdir(), 'openvpn-installer.msi');
 
 // Глобальный идентификатор клиента для статистики подключений
@@ -565,6 +591,114 @@ function updateTrayMenu() {
   }
 }
 
+// Настройка автообновления
+function setupAutoUpdater() {
+  // Настраиваем URL для загрузки обновлений (должен соответствовать publish.url в package.json)
+  autoUpdater.setFeedURL({
+    provider: 'generic',
+    url: 'http://45.147.178.200:3000/downloads'
+  });
+
+  // Настраиваем интервал проверки обновлений (каждые 2 часа)
+  const checkInterval = 2 * 60 * 60 * 1000;
+  setInterval(() => {
+    autoUpdater.checkForUpdates();
+  }, checkInterval);
+
+  // Первая проверка через 1 минуту после запуска
+  setTimeout(() => {
+    console.log('Проверка обновлений...');
+    autoUpdater.checkForUpdates().catch(err => {
+      console.error('Ошибка при проверке обновлений:', err);
+    });
+  }, 60000);
+
+  // Обработчики событий автообновления
+  autoUpdater.on('checking-for-update', () => {
+    console.log('Проверка наличия обновлений...');
+  });
+
+  autoUpdater.on('update-available', (info) => {
+    console.log('Доступно обновление!', info);
+    
+    // Уведомляем пользователя о доступном обновлении
+    if (mainWindow) {
+      mainWindow.webContents.send('update-available', info);
+      
+      // Показываем нативное уведомление
+      const notification = new Notification({
+        title: 'Доступно обновление',
+        body: `Новая версия BeNice VPN доступна (v${info.version}). Обновление будет установлено автоматически.`
+      });
+      
+      notification.show();
+    }
+  });
+
+  autoUpdater.on('update-not-available', () => {
+    console.log('Обновлений не найдено');
+  });
+
+  autoUpdater.on('error', (err) => {
+    console.error('Ошибка при обновлении:', err);
+    if (mainWindow) {
+      mainWindow.webContents.send('update-error', { error: err.message });
+    }
+  });
+
+  autoUpdater.on('download-progress', (progressObj) => {
+    console.log(`Загрузка обновления: ${Math.round(progressObj.percent)}%`);
+    
+    // Передаем информацию о прогрессе в окно приложения
+    if (mainWindow) {
+      mainWindow.webContents.send('update-progress', progressObj);
+    }
+    
+    // Обновляем меню трея с информацией о загрузке
+    updateTrayMenu();
+  });
+
+  autoUpdater.on('update-downloaded', (info) => {
+    console.log('Обновление загружено. Будет установлено при перезапуске.', info);
+    
+    // Уведомляем пользователя
+    if (mainWindow) {
+      mainWindow.webContents.send('update-downloaded', info);
+      
+      // Показываем диалог с предложением перезапустить приложение
+      dialog.showMessageBox(mainWindow, {
+        type: 'info',
+        title: 'Обновление загружено',
+        message: `Новая версия BeNice VPN (v${info.version}) загружена и готова к установке.`,
+        buttons: ['Перезапустить сейчас', 'Позже'],
+        defaultId: 0
+      }).then((result) => {
+        if (result.response === 0) {
+          // Если пользователь выбрал "Перезапустить сейчас"
+          console.log('Перезапуск для установки обновления...');
+          autoUpdater.quitAndInstall(true, true);
+        }
+      }).catch(err => {
+        console.error('Ошибка при отображении диалога обновления:', err);
+      });
+      
+      // Показываем нативное уведомление
+      const notification = new Notification({
+        title: 'Обновление загружено',
+        body: 'Нажмите, чтобы установить обновление BeNice VPN.',
+        silent: false
+      });
+      
+      notification.on('click', () => {
+        console.log('Установка обновления после клика на уведомлении...');
+        autoUpdater.quitAndInstall(true, true);
+      });
+      
+      notification.show();
+    }
+  });
+}
+
 // При запуске приложения
 app.whenReady().then(async () => {
   console.log('Очищаем кэш сессии...');
@@ -577,23 +711,14 @@ app.whenReady().then(async () => {
   // Загружаем сохраненный токен авторизации, если он есть
   loadSavedAuthToken();
   
-  // Временно отключаем проверку прав администратора для тестирования
-  // const isAdmin = await isRunAsAdmin();
-  // 
-  // if (!isAdmin) {
-  //   // Предупреждаем и перезапускаем с правами администратора
-  //   restartAsAdmin();
-  //   return;
-  // }
-  
-  // Включаем автозапуск
-  // await setAutoLaunch(true);
-  
   // Создаем трей
   createTray();
   
   // Создаем окно приложения
   createWindow();
+  
+  // Настраиваем систему автообновления
+  setupAutoUpdater();
   
   // Запускаем обновления аналитики серверов
   startAnalyticsUpdates();
