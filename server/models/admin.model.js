@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const bcrypt = require('bcrypt');
 
 // Schema для администратора
 const adminSchema = new mongoose.Schema({
@@ -38,9 +39,23 @@ const adminSchema = new mongoose.Schema({
   }
 }, { timestamps: true });
 
-// Простое сравнение паролей без bcrypt для демо-версии
-adminSchema.methods.comparePassword = function(candidatePassword) {
-  return Promise.resolve(this.password === candidatePassword);
+// Улучшенное сравнение паролей с поддержкой как хэшированных, так и обычных паролей
+adminSchema.methods.comparePassword = async function(candidatePassword) {
+  try {
+    // Проверяем, является ли пароль хешем bcrypt (начинается с $2a$, $2b$ или $2y$)
+    if (this.password.startsWith('$2')) {
+      // Если да, используем bcrypt для сравнения
+      console.log('Using bcrypt for password comparison');
+      return await bcrypt.compare(candidatePassword, this.password);
+    } else {
+      // Если нет, используем простое сравнение
+      console.log('Using direct comparison for password');
+      return this.password === candidatePassword;
+    }
+  } catch (error) {
+    console.error('Error comparing passwords:', error);
+    return false;
+  }
 };
 
-module.exports = mongoose.model('Admin', adminSchema); 
+module.exports = mongoose.model('Admin', adminSchema);

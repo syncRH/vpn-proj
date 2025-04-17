@@ -1,54 +1,60 @@
 import axios from 'axios';
 import { API_CONFIG } from '../config/api.config';
 
-const API_URL = `${API_CONFIG.baseUrl}/api/users`;
+// Use the centralized API configuration
+const API_BASE = `${API_CONFIG.baseUrl}/users`;
 
-// Настройка axios для включения токена в заголовки
-const axiosWithToken = (token) => {
-  return axios.create({
+// Получение списка всех пользователей
+const getAllUsers = async (token) => {
+  return axios.get(API_BASE, {
     headers: {
       'Authorization': `Bearer ${token}`
     }
   });
 };
 
-// Получение списка пользователей
-const getUsers = (token) => {
-  return axiosWithToken(token).get(API_URL);
+// Получение данных пользователя по ID
+const getUserById = async (id, token) => {
+  return axios.get(`${API_BASE}/${id}`, {
+    headers: {
+      'Authorization': `Bearer ${token}`
+    }
+  });
 };
 
-// Получение информации о пользователе по ID
-const getUserById = (id, token) => {
-  return axiosWithToken(token).get(`${API_URL}/${id}`);
-};
-
-// Создание нового пользователя (генерация ключа активации)
-const createUser = (userData, token) => {
-  return axiosWithToken(token).post(API_URL, userData);
+// Создание нового пользователя
+const createUser = async (userData, token) => {
+  return axios.post(API_BASE, userData, {
+    headers: {
+      'Authorization': `Bearer ${token}`
+    }
+  });
 };
 
 // Обновление данных пользователя
-const updateUser = (id, userData, token) => {
-  return axiosWithToken(token).put(`${API_URL}/${id}`, userData);
+const updateUser = async (id, userData, token) => {
+  return axios.put(`${API_BASE}/${id}`, userData, {
+    headers: {
+      'Authorization': `Bearer ${token}`
+    }
+  });
 };
 
 // Удаление пользователя
-const deleteUser = (id, token) => {
-  return axiosWithToken(token).delete(`${API_URL}/${id}`);
-};
-
-// Получение статистики пользователей
-const getUserStats = (token) => {
-  return axiosWithToken(token).get(`${API_URL}/stats/overview`);
+const deleteUser = async (id, token) => {
+  return axios.delete(`${API_BASE}/${id}`, {
+    headers: {
+      'Authorization': `Bearer ${token}`
+    }
+  });
 };
 
 const userService = {
-  getUsers,
+  getAllUsers,
   getUserById,
   createUser,
   updateUser,
-  deleteUser,
-  getUserStats
+  deleteUser
 };
 
 export default userService;

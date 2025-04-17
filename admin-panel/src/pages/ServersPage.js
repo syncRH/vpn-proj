@@ -2,10 +2,10 @@ import React, { useState, useEffect } from 'react';
 import {
   Box, Typography, Button, Paper, CircularProgress, Snackbar, Alert,
   Dialog, DialogTitle, DialogContent, DialogActions, TextField,
-  FormControl, InputLabel, Select, MenuItem, Modal, FormControlLabel, Switch, Grid, Container, LinearProgress, Tooltip
+  FormControlLabel, Switch, Grid, Container, LinearProgress, Tooltip
 } from '@mui/material';
 import { DataGrid } from '@mui/x-data-grid';
-import { Add as AddIcon, Edit as EditIcon, Delete as DeleteIcon, CloudUpload as CloudUploadIcon, Check as CheckIcon } from '@mui/icons-material';
+import { Add as AddIcon, Edit as EditIcon, Delete as DeleteIcon, CloudUpload as CloudUploadIcon } from '@mui/icons-material';
 import InfoIcon from '@mui/icons-material/Info';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import ErrorIcon from '@mui/icons-material/Error';
@@ -15,10 +15,9 @@ import axios from 'axios';
 const ServersPage = () => {
   const [servers, setServers] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
   const [snackbar, setSnackbar] = useState({ open: false, message: '', severity: 'success' });
   const [dialogOpen, setDialogOpen] = useState(false);
-  const [dialogType, setDialogType] = useState('add'); // 'add' или 'edit'
+  const [dialogType, setDialogType] = useState('add');
   const [selectedServer, setSelectedServer] = useState(null);
   const [formData, setFormData] = useState({
     name: '',
@@ -42,13 +41,12 @@ const ServersPage = () => {
     fullVpn: null
   });
 
-  // Максимальный размер файла в байтах (5 МБ)
   const MAX_FILE_SIZE = 5 * 1024 * 1024;
 
   const fetchServers = async () => {
     try {
       setLoading(true);
-      
+
       const response = await axios.get('/api/servers');
       if (response.data && response.data.servers) {
         setServers(response.data.servers);
@@ -56,11 +54,8 @@ const ServersPage = () => {
         setServers([]);
         console.log('Список серверов пуст.');
       }
-      
-      setError(null);
     } catch (err) {
       console.error('Ошибка загрузки серверов:', err);
-      setError('Не удалось загрузить список серверов');
       setServers([]);
     } finally {
       setLoading(false);
@@ -110,15 +105,6 @@ const ServersPage = () => {
     setFormData({ ...formData, [name]: value });
   };
 
-  const handleFileChange = (e) => {
-    const { name, files } = e.target;
-    if (name === 'antizapretConfig') {
-      setAntizapretFile(files[0]);
-    } else if (name === 'fullVpnConfig') {
-      setFullVpnFile(files[0]);
-    }
-  };
-
   const handleDragOverAntizapret = (event) => {
     event.preventDefault();
     event.stopPropagation();
@@ -135,7 +121,7 @@ const ServersPage = () => {
     event.preventDefault();
     event.stopPropagation();
     setDragOverAntizapret(false);
-    
+
     const files = event.dataTransfer.files;
     if (files.length) {
       const file = files[0];
@@ -162,7 +148,7 @@ const ServersPage = () => {
     event.preventDefault();
     event.stopPropagation();
     setDragOverFullVpn(false);
-    
+
     const files = event.dataTransfer.files;
     if (files.length) {
       const file = files[0];
@@ -174,26 +160,26 @@ const ServersPage = () => {
   };
 
   const validateFile = (file, type) => {
-    const errors = {...fileValidationErrors};
-    
+    const errors = { ...fileValidationErrors };
+
     if (!file) {
       errors[type] = null;
       setFileValidationErrors(errors);
       return true;
     }
-    
+
     if (!file.name.endsWith('.ovpn')) {
       errors[type] = 'Файл должен иметь расширение .ovpn';
       setFileValidationErrors(errors);
       return false;
     }
-    
+
     if (file.size > MAX_FILE_SIZE) {
       errors[type] = `Размер файла не должен превышать ${MAX_FILE_SIZE / (1024 * 1024)} МБ`;
       setFileValidationErrors(errors);
       return false;
     }
-    
+
     errors[type] = null;
     setFileValidationErrors(errors);
     return true;
@@ -224,7 +210,6 @@ const ServersPage = () => {
   };
 
   const handleSubmit = async () => {
-    // Проверяем IP адрес
     const ipRegex = /^(\d{1,3}\.){3}\d{1,3}$/;
     if (!ipRegex.test(formData.ipAddress)) {
       setSnackbar({
@@ -235,7 +220,6 @@ const ServersPage = () => {
       return;
     }
 
-    // Проверяем наличие файлов
     if (dialogType === 'add' && !antizapretFile) {
       setSnackbar({
         open: true,
@@ -258,9 +242,7 @@ const ServersPage = () => {
       setUploading(true);
       setIsFileUploading(true);
 
-      let serverData;
       if (dialogType === 'add') {
-        // Добавление сервера
         const formDataToSend = new FormData();
         formDataToSend.append('name', formData.name);
         formDataToSend.append('host', formData.host);
@@ -268,16 +250,16 @@ const ServersPage = () => {
         formDataToSend.append('country', formData.country);
         formDataToSend.append('city', formData.city);
         formDataToSend.append('isActive', formData.isActive);
-        
+
         if (antizapretFile) {
           formDataToSend.append('antizapretConfig', antizapretFile);
         }
-        
+
         if (fullVpnFile) {
           formDataToSend.append('fullVpnConfig', fullVpnFile);
         }
 
-        const response = await axios.post('/api/servers', formDataToSend, {
+        await axios.post('/api/servers', formDataToSend, {
           headers: {
             'Content-Type': 'multipart/form-data'
           },
@@ -287,14 +269,12 @@ const ServersPage = () => {
           }
         });
 
-        serverData = response.data.server;
         setSnackbar({
           open: true,
           message: 'Сервер успешно добавлен',
           severity: 'success'
         });
       } else {
-        // Обновление сервера
         const formDataToSend = new FormData();
         formDataToSend.append('name', formData.name);
         formDataToSend.append('host', formData.host);
@@ -311,7 +291,7 @@ const ServersPage = () => {
           formDataToSend.append('fullVpnConfig', fullVpnFile);
         }
 
-        const response = await axios.put(`/api/servers/${selectedServer._id}`, formDataToSend, {
+        await axios.put(`/api/servers/${selectedServer._id}`, formDataToSend, {
           headers: {
             'Content-Type': 'multipart/form-data'
           },
@@ -321,7 +301,6 @@ const ServersPage = () => {
           }
         });
 
-        serverData = response.data.server;
         setSnackbar({
           open: true,
           message: 'Сервер успешно обновлен',
@@ -338,13 +317,12 @@ const ServersPage = () => {
       fetchServers();
     } catch (err) {
       console.error('Ошибка при отправке данных:', err);
-      
+
       let errorMessage = 'Произошла ошибка при обработке запроса.';
-      
+
       if (err.response) {
         const status = err.response.status;
-        
-        // Обработка различных ошибок сервера
+
         if (status === 400) {
           errorMessage = 'Неверные данные. Пожалуйста, проверьте введенную информацию.';
         } else if (status === 409) {
@@ -358,12 +336,12 @@ const ServersPage = () => {
         } else if (status >= 500) {
           errorMessage = 'Ошибка сервера. Пожалуйста, попробуйте позже.';
         }
-        
+
         if (err.response.data && err.response.data.message) {
           errorMessage = err.response.data.message;
         }
       }
-      
+
       setSnackbar({
         open: true,
         message: errorMessage,
@@ -380,21 +358,20 @@ const ServersPage = () => {
     const serverToDelete = servers.find(server => server._id === id);
     try {
       setLoading(true);
-      
-      // Делаем запрос к API для удаления сервера
+
       await axios.delete(`/api/servers/${id}`);
-      setSnackbar({ 
-        open: true, 
-        message: `Сервер "${serverToDelete.name}" успешно удален`, 
-        severity: 'success' 
+      setSnackbar({
+        open: true,
+        message: `Сервер "${serverToDelete.name}" успешно удален`,
+        severity: 'success'
       });
       fetchServers();
     } catch (err) {
       console.error('Ошибка при удалении сервера:', err);
-      setSnackbar({ 
-        open: true, 
-        message: `Ошибка при удалении сервера: ${err.message}`, 
-        severity: 'error' 
+      setSnackbar({
+        open: true,
+        message: `Ошибка при удалении сервера: ${err.message}`,
+        severity: 'error'
       });
     } finally {
       setLoading(false);
@@ -412,9 +389,9 @@ const ServersPage = () => {
     { field: 'ipAddress', headerName: 'IP адрес', width: 120 },
     { field: 'country', headerName: 'Страна', width: 100 },
     { field: 'city', headerName: 'Город', width: 100 },
-    { 
-      field: 'activeConnections', 
-      headerName: 'Подключено пользователей', 
+    {
+      field: 'activeConnections',
+      headerName: 'Подключено пользователей',
       width: 180,
       renderCell: (params) => (
         <Typography variant="body2" sx={{ fontWeight: 'bold' }}>
@@ -422,9 +399,9 @@ const ServersPage = () => {
         </Typography>
       )
     },
-    { 
-      field: 'isActive', 
-      headerName: 'Статус', 
+    {
+      field: 'isActive',
+      headerName: 'Статус',
       width: 100,
       renderCell: (params) => (
         <Typography
@@ -539,7 +516,7 @@ const ServersPage = () => {
               onChange={handleInputChange}
               helperText="Автоматически извлекается из .ovpn файла, если не указано"
             />
-            
+
             <TextField
               margin="normal"
               fullWidth
@@ -561,7 +538,7 @@ const ServersPage = () => {
               value={formData.ipAddress || ''}
               onChange={handleInputChange}
             />
-            
+
             <Grid container spacing={2}>
               <Grid item xs={6}>
                 <TextField
@@ -604,7 +581,7 @@ const ServersPage = () => {
             )}
 
             <Typography variant="h6" sx={{ mt: 3, mb: 1 }}>
-              Загрузка конфигурационных файлов 
+              Загрузка конфигурационных файлов
               <Tooltip title="Загрузите файлы в формате .ovpn размером до 5 МБ">
                 <InfoIcon fontSize="small" color="action" sx={{ ml: 1, verticalAlign: 'middle' }} />
               </Tooltip>
@@ -624,26 +601,26 @@ const ServersPage = () => {
                     <ErrorIcon color="error" fontSize="small" sx={{ ml: 1 }} />
                   )}
                 </Typography>
-                <Box 
+                <Box
                   sx={{
                     border: '2px dashed',
-                    borderColor: fileValidationErrors.antizapret 
-                      ? 'error.main' 
-                      : dragOverAntizapret 
-                        ? 'primary.main' 
-                        : antizapretFile 
-                          ? 'success.main' 
+                    borderColor: fileValidationErrors.antizapret
+                      ? 'error.main'
+                      : dragOverAntizapret
+                        ? 'primary.main'
+                        : antizapretFile
+                          ? 'success.main'
                           : 'grey.400',
                     borderRadius: 1,
                     p: 2,
                     mt: 1,
                     mb: 2,
-                    bgcolor: fileValidationErrors.antizapret 
-                      ? 'rgba(211, 47, 47, 0.04)' 
-                      : dragOverAntizapret 
-                        ? 'rgba(25, 118, 210, 0.08)' 
-                        : antizapretFile 
-                          ? 'rgba(46, 125, 50, 0.04)' 
+                    bgcolor: fileValidationErrors.antizapret
+                      ? 'rgba(211, 47, 47, 0.04)'
+                      : dragOverAntizapret
+                        ? 'rgba(25, 118, 210, 0.08)'
+                        : antizapretFile
+                          ? 'rgba(46, 125, 50, 0.04)'
                           : 'transparent',
                     transition: 'all 0.3s',
                     display: 'flex',
@@ -676,14 +653,14 @@ const ServersPage = () => {
                         </Typography>
                       )}
                       <Box sx={{ display: 'flex', alignItems: 'center', mt: 1, width: '100%', justifyContent: 'center' }}>
-                        <Button 
-                          size="small" 
-                          color="error" 
+                        <Button
+                          size="small"
+                          color="error"
                           onClick={(e) => {
                             e.stopPropagation();
                             setAntizapretFile(null);
                             setAntizapretFileName('');
-                            setFileValidationErrors({...fileValidationErrors, antizapret: null});
+                            setFileValidationErrors({ ...fileValidationErrors, antizapret: null });
                           }}
                           startIcon={<DeleteIcon />}
                           variant="outlined"
@@ -707,10 +684,10 @@ const ServersPage = () => {
                           <Typography variant="caption" sx={{ mt: 1 }}>
                             Загрузка: {uploadProgress}%
                           </Typography>
-                          <LinearProgress 
-                            variant="determinate" 
-                            value={uploadProgress} 
-                            sx={{ width: '100%', mt: 1 }} 
+                          <LinearProgress
+                            variant="determinate"
+                            value={uploadProgress}
+                            sx={{ width: '100%', mt: 1 }}
                           />
                         </>
                       )}
@@ -739,26 +716,26 @@ const ServersPage = () => {
                     <ErrorIcon color="error" fontSize="small" sx={{ ml: 1 }} />
                   )}
                 </Typography>
-                <Box 
+                <Box
                   sx={{
                     border: '2px dashed',
-                    borderColor: fileValidationErrors.fullVpn 
-                      ? 'error.main' 
-                      : dragOverFullVpn 
-                        ? 'primary.main' 
-                        : fullVpnFile 
-                          ? 'success.main' 
+                    borderColor: fileValidationErrors.fullVpn
+                      ? 'error.main'
+                      : dragOverFullVpn
+                        ? 'primary.main'
+                        : fullVpnFile
+                          ? 'success.main'
                           : 'grey.400',
                     borderRadius: 1,
                     p: 2,
                     mt: 1,
                     mb: 2,
-                    bgcolor: fileValidationErrors.fullVpn 
-                      ? 'rgba(211, 47, 47, 0.04)' 
-                      : dragOverFullVpn 
-                        ? 'rgba(25, 118, 210, 0.08)' 
-                        : fullVpnFile 
-                          ? 'rgba(46, 125, 50, 0.04)' 
+                    bgcolor: fileValidationErrors.fullVpn
+                      ? 'rgba(211, 47, 47, 0.04)'
+                      : dragOverFullVpn
+                        ? 'rgba(25, 118, 210, 0.08)'
+                        : fullVpnFile
+                          ? 'rgba(46, 125, 50, 0.04)'
                           : 'transparent',
                     transition: 'all 0.3s',
                     display: 'flex',
@@ -791,14 +768,14 @@ const ServersPage = () => {
                         </Typography>
                       )}
                       <Box sx={{ display: 'flex', alignItems: 'center', mt: 1, width: '100%', justifyContent: 'center' }}>
-                        <Button 
-                          size="small" 
-                          color="error" 
+                        <Button
+                          size="small"
+                          color="error"
                           onClick={(e) => {
                             e.stopPropagation();
                             setFullVpnFile(null);
                             setFullVpnFileName('');
-                            setFileValidationErrors({...fileValidationErrors, fullVpn: null});
+                            setFileValidationErrors({ ...fileValidationErrors, fullVpn: null });
                           }}
                           startIcon={<DeleteIcon />}
                           variant="outlined"
@@ -822,10 +799,10 @@ const ServersPage = () => {
                           <Typography variant="caption" sx={{ mt: 1 }}>
                             Загрузка: {uploadProgress}%
                           </Typography>
-                          <LinearProgress 
-                            variant="determinate" 
-                            value={uploadProgress} 
-                            sx={{ width: '100%', mt: 1 }} 
+                          <LinearProgress
+                            variant="determinate"
+                            value={uploadProgress}
+                            sx={{ width: '100%', mt: 1 }}
                           />
                         </>
                       )}

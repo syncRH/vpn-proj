@@ -25,6 +25,10 @@ const RATE_LIMIT_WINDOW = process.env.RATE_LIMIT_WINDOW || 15;
 const RATE_LIMIT_MAX = process.env.RATE_LIMIT_MAX || 100;
 const LOGS_DIR = process.env.LOGS_DIR || './logs';
 
+// Настройка доверия к прокси для работы через Nginx
+app.set('trust proxy', true);
+console.log('Express trust proxy установлен в true');
+
 // Настройка логирования
 const logsDir = path.join(__dirname, LOGS_DIR);
 if (!fs.existsSync(logsDir)) {
@@ -78,13 +82,19 @@ try {
   logger.error('Ошибка при создании директорий:', err);
 }
 
-// Подключение к БД
+// Подключение к БД с увеличенным таймаутом
 mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/vpn-service', {
   useNewUrlParser: true,
   useUnifiedTopology: true,
+  serverSelectionTimeoutMS: 30000, // Увеличиваем таймаут до 30 секунд
+  socketTimeoutMS: 45000, // Увеличиваем Socket Timeout
+  heartbeatFrequencyMS: 10000 // Увеличиваем частоту проверки соединения
 })
 .then(() => logger.info('MongoDB подключена'))
-.catch(err => logger.error('Ошибка подключения к MongoDB:', err));
+.catch(err => {
+  logger.error('Ошибка подключения к MongoDB:', err);
+  console.error('Ошибка подключения к MongoDB:', err);
+});
 
 // Настройка rate limiting
 const limiter = rateLimit({
@@ -200,10 +210,6 @@ app.get('/api/servers-public', async (req, res) => {
     // Получаем серверы без проверки авторизации
     const ServerModel = require('./models/server.model');
     const servers = await ServerModel.find({ status: 'active' });
-    
-    // Добавляем дополнительные заголовки для кросс-доменных запросов
-    res.header("Access-Control-Allow-Origin", "*");
-    res.header("Cache-Control", "no-cache, no-store, must-revalidate");
     
     return res.status(200).json(servers);
   } catch (error) {

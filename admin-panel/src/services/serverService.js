@@ -1,99 +1,66 @@
 import axios from 'axios';
 import { API_CONFIG } from '../config/api.config';
 
-const API_URL = `${API_CONFIG.baseUrl}/api/servers`;
+// Use the centralized API configuration
+const API_BASE = `${API_CONFIG.baseUrl}/servers`;
 
-// Настройка axios для включения токена в заголовки
-const axiosWithToken = (token) => {
-  return axios.create({
+// Получение списка всех серверов
+const getAllServers = async (token) => {
+  return axios.get(API_BASE, {
     headers: {
       'Authorization': `Bearer ${token}`
     }
   });
 };
 
-// Получение списка серверов
-const getServers = (token) => {
-  return axiosWithToken(token).get(API_URL);
-};
-
-// Получение информации о сервере по ID
-const getServerById = (id, token) => {
-  return axiosWithToken(token).get(`${API_URL}/${id}`);
-};
-
-// Добавление нового сервера
-const addServer = (serverData, token) => {
-  // Создание FormData для отправки файлов
-  const formData = new FormData();
-  formData.append('ipAddress', serverData.ipAddress);
-  
-  if (serverData.antizapretConfig) {
-    formData.append('antizapretConfig', serverData.antizapretConfig);
-  }
-  
-  if (serverData.fullVpnConfig) {
-    formData.append('fullVpnConfig', serverData.fullVpnConfig);
-  }
-  
-  return axiosWithToken(token).post(API_URL, formData, {
+// Получение данных сервера по ID
+const getServerById = async (id, token) => {
+  return axios.get(`${API_BASE}/${id}`, {
     headers: {
-      'Content-Type': 'multipart/form-data'
+      'Authorization': `Bearer ${token}`
     }
   });
 };
 
-// Обновление сервера
-const updateServer = (id, serverData, token) => {
-  // Создание FormData для отправки файлов
-  const formData = new FormData();
-  
-  if (serverData.ipAddress) {
-    formData.append('ipAddress', serverData.ipAddress);
-  }
-  
-  if (serverData.isActive !== undefined) {
-    formData.append('isActive', serverData.isActive);
-  }
-  
-  if (serverData.antizapretConfig) {
-    formData.append('antizapretConfig', serverData.antizapretConfig);
-  }
-  
-  if (serverData.fullVpnConfig) {
-    formData.append('fullVpnConfig', serverData.fullVpnConfig);
-  }
-  
-  return axiosWithToken(token).put(`${API_URL}/${id}`, formData, {
+// Создание нового сервера
+const createServer = async (serverData, token) => {
+  return axios.post(API_BASE, serverData, {
     headers: {
-      'Content-Type': 'multipart/form-data'
+      'Authorization': `Bearer ${token}`
+    }
+  });
+};
+
+// Обновление данных сервера
+const updateServer = async (id, serverData, token) => {
+  return axios.put(`${API_BASE}/${id}`, serverData, {
+    headers: {
+      'Authorization': `Bearer ${token}`
     }
   });
 };
 
 // Удаление сервера
-const deleteServer = (id, token) => {
-  return axiosWithToken(token).delete(`${API_URL}/${id}`);
+const deleteServer = async (id, token) => {
+  return axios.delete(`${API_BASE}/${id}`, {
+    headers: {
+      'Authorization': `Bearer ${token}`
+    }
+  });
 };
 
-// Получение конфигурационного файла Antizapret
-const getAntizapretConfig = (id, token) => {
-  return axiosWithToken(token).get(`${API_URL}/${id}/antizapret-config`);
-};
-
-// Получение конфигурационного файла полного VPN
-const getFullVpnConfig = (id, token) => {
-  return axiosWithToken(token).get(`${API_URL}/${id}/vpn-config`);
+// Получение данных для публичного списка серверов
+const getPublicServers = async () => {
+  return axios.get(`${API_CONFIG.baseUrl}/servers-public`);
 };
 
 const serverService = {
-  getServers,
+  getAllServers,
   getServerById,
-  addServer,
+  createServer,
   updateServer,
   deleteServer,
-  getAntizapretConfig,
-  getFullVpnConfig
+  getPublicServers
 };
 
 export default serverService;

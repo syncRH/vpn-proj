@@ -1,12 +1,25 @@
-FROM node:14
+FROM node:16-alpine
 
+# Установка рабочей директории
 WORKDIR /app
 
+# Копирование package.json и package-lock.json
 COPY package*.json ./
-RUN npm install
 
+# Установка зависимостей
+RUN npm install --production
+
+# Копирование исходного кода приложения
 COPY . .
 
+# Создание директорий для логов и конфигураций
+RUN mkdir -p logs uploads/configs
+
+# Назначение прав на директории
+RUN chmod -R 755 logs uploads
+
+# Экспонирование порта
 EXPOSE 3000
 
-CMD ["npm", "run", "dev"] 
+# Запуск приложения
+CMD ["node", "server.js"]
