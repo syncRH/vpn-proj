@@ -7,32 +7,40 @@ const isDevelopment = process.env.NODE_ENV === 'development';
 // In production, use relative URLs that will be handled by Nginx proxy
 axios.defaults.baseURL = isDevelopment ? 'http://127.0.0.1:3000' : '';
 
-// Убедимся, что в production baseURL действительно пустой
-if (!isDevelopment && window.location.hostname !== 'localhost') {
-  console.log('Running in production mode, using relative paths for API requests');
+// Explicitly override the baseURL for production
+if (window.location.hostname !== 'localhost') {
+  // Force empty baseURL in production to use relative paths
+  console.log('Production environment detected, forcing relative API paths');
   axios.defaults.baseURL = '';
 }
 
 console.log(`Axios baseURL configured as: ${axios.defaults.baseURL} (${process.env.NODE_ENV || 'production'} mode)`);
 
-// Добавляем обработку ошибок сетевого соединения
-axios.interceptors.response.use(
-  response => response,
-  error => {
-    if (error.code === 'ECONNABORTED' || error.message === 'Network Error') {
-      console.error('Ошибка сетевого соединения:', error.message);
+// Add interceptor to fix request URLs in production
+axios.interceptors.request.use(
+  config => {
+    // For debugging
+    if (config.baseURL === '' && config.url.startsWith('/api')) {
+      console.log(`Making ${config.method.toUpperCase()} request with relative path: ${config.url}`);
+    } else {
+      console.log(`Making ${config.method.toUpperCase()} request to: ${config.baseURL || ''}${config.url}`);
     }
+    return config;
+  },
+  error => {
     return Promise.reject(error);
   }
 );
 
-// Add interceptor for logging
-axios.interceptors.request.use(
-  config => {
-    console.log(`Making ${config.method.toUpperCase()} request to: ${config.baseURL || ''}${config.url}`);
-    return config;
-  },
+// Add error handling for network issues
+axios.interceptors.response.use(
+  response => response,
   error => {
+    if (error.code === 'ECONNABORTED' || error.message === 'Network Error') {
+      console.error('Network connection error:', error.message);
+    } else if (error.response) {
+      console.error(`API error: ${error.response.status} - ${error.response.statusText}`);
+    }
     return Promise.reject(error);
   }
 );
