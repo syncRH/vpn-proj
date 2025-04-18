@@ -122,9 +122,13 @@ app.use('/api/', limiter);
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Логирование запросов
+// Улучшенное логирование запросов для отладки
 app.use((req, res, next) => {
   logger.info(`${req.method} ${req.url} ${req.ip}`);
+  console.log(`[REQUEST DEBUG] ${req.method} ${req.originalUrl}`);
+  if (req.method === 'POST') {
+    console.log('[REQUEST BODY]', req.body);
+  }
   next();
 });
 
