@@ -170,7 +170,8 @@ app.get('/api/health', (req, res) => {
 
 // Эндпоинт для отладки запросов
 app.get('/api/debug-token', (req, res) => {
-  const token = req.header('Authorization')?.replace('Bearer ', '') || req.header('x-auth-token');
+  const authHeader = req.header('Authorization');
+  const token = authHeader ? authHeader.replace('Bearer ', '') : req.header('x-auth-token');
   
   if (!token) {
     return res.status(200).json({
@@ -209,7 +210,7 @@ app.get('/api/servers-public', async (req, res) => {
   try {
     // Получаем серверы без проверки авторизации
     const ServerModel = require('./models/server.model');
-    const servers = await ServerModel.find({ status: 'active' });
+    const servers = await ServerModel.find({ isActive: true });
     
     return res.status(200).json(servers);
   } catch (error) {
