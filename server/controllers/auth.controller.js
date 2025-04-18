@@ -84,17 +84,21 @@ exports.login = async (req, res) => {
     // Отладочная информация о пароле
     console.log('Password comparison:', {
       providedPassword: password,
-      storedPassword: admin.password,
-      usingBcrypt: false
+      storedPassword: admin.password ? admin.password.substring(0, 15) + '...' : 'N/A', // Log only prefix of hash
+      usingBcrypt: admin.password && admin.password.startsWith('$2') // Check if bcrypt should be used
     });
 
     // Проверяем пароль, используя метод comparePassword из модели
+    console.log('[Login] Calling comparePassword...'); // New log
     const isPasswordValid = await admin.comparePassword(password);
-    console.log('Password validation result:', isPasswordValid);
+    console.log(`[Login] comparePassword returned: ${isPasswordValid}`); // New log - THIS IS IMPORTANT
     
     if (!isPasswordValid) {
+      console.log('[Login] Password validation failed.'); // New log
       return res.status(401).json({ success: false, message: 'Неверный email или пароль' });
     }
+
+    console.log('[Login] Password validation successful. Generating token...'); // New log
 
     // Создаем JWT токен
     const token = jwt.sign(

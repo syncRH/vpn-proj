@@ -26,8 +26,8 @@ const RATE_LIMIT_MAX = process.env.RATE_LIMIT_MAX || 100;
 const LOGS_DIR = process.env.LOGS_DIR || './logs';
 
 // Настройка доверия к прокси для работы через Nginx
-app.set('trust proxy', true);
-console.log('Express trust proxy установлен в true');
+app.set('trust proxy', 1);
+console.log('Express trust proxy установлен в 1');
 
 // Настройка логирования
 const logsDir = path.join(__dirname, LOGS_DIR);
@@ -100,7 +100,8 @@ mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/vpn-servi
 const limiter = rateLimit({
   windowMs: RATE_LIMIT_WINDOW * 60 * 1000, // в минутах
   max: RATE_LIMIT_MAX, // максимальное количество запросов
-  message: { message: 'Слишком много запросов, попробуйте позже' }
+  standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
+  legacyHeaders: false, // Disable the `X-RateLimit-*` headers
 });
 
 // Middleware
@@ -116,7 +117,8 @@ app.use(cors({
 app.use(compression()); // Сжатие ответов
 
 // Ограничение запросов
-app.use('/api/', limiter);
+app.use(limiter);
+console.log('Rate limiter middleware applied.');
 
 // Парсинг запросов
 app.use(express.json());
