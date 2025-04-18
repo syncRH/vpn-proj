@@ -9,6 +9,17 @@ axios.defaults.baseURL = isDevelopment ? 'http://127.0.0.1:3000' : '';
 
 console.log(`Axios baseURL configured as: ${axios.defaults.baseURL} (${process.env.NODE_ENV || 'production'} mode)`);
 
+// Добавляем обработку ошибок сетевого соединения
+axios.interceptors.response.use(
+  response => response,
+  error => {
+    if (error.code === 'ECONNABORTED' || error.message === 'Network Error') {
+      console.error('Ошибка сетевого соединения:', error.message);
+    }
+    return Promise.reject(error);
+  }
+);
+
 // Add interceptor for logging
 axios.interceptors.request.use(
   config => {
