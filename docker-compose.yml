@@ -25,8 +25,8 @@ services:
   server:
     build:
       context: ./server
-    container_name: vpn-server
-    hostname: vpn-server
+    container_name: server
+    hostname: server
     restart: always
     depends_on:
       - mongodb
@@ -59,7 +59,7 @@ services:
   admin:
     build:
       context: ./admin-panel
-    container_name: vpn-admin
+    container_name: admin
     restart: always
     depends_on:
       - server
@@ -69,8 +69,6 @@ services:
       - "3001:3001"
     networks:
       - vpn-network
-    links:
-      - server:vpn-server
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3001"]
       interval: 30s
