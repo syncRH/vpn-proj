@@ -1,0 +1,5 @@
+В строке отсутствует завершающий символ: ".
+    + CategoryInfo          : ParserError: (:) [], ParentContainsErrorRecordEx 
+   ception
+    + FullyQualifiedErrorId : TerminatorExpectedAtEndOfString
+ 

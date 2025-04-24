@@ -8,6 +8,13 @@ const electron = require('electron');
 const https = require('https');
 const sudo = require('sudo-prompt');
 
+// Импорт модулей стабильности и улучшения VPN
+const KillSwitch = require('./src/killswitch');
+const ConnectionStability = require('./src/connection-stability');
+const SplitTunneling = require('./src/split-tunneling');
+const ServerSelector = require('./src/server-selector');
+const SmartNotifications = require('./src/smart-notifications');
+
 // IMPORTANT: Temporarily disable auto-updater since it's causing startup issues
 // const { autoUpdater } = require('electron-updater');
 
@@ -17,6 +24,24 @@ console.log('Starting VPN Client application...');
 console.log('Electron version:', process.versions.electron);
 console.log('Platform:', process.platform);
 console.log('Architecture:', process.arch);
+
+// Создание экземпляров модулей улучшения VPN
+const killSwitch = new KillSwitch();
+const connectionStability = new ConnectionStability({
+  checkInterval: 5000,  // Проверка каждые 5 секунд
+  maxRetries: 3,        // Максимум 3 попытки переподключения
+  retryDelay: 3000      // Задержка 3 секунды между попытками
+});
+const splitTunneling = new SplitTunneling();
+const serverSelector = new ServerSelector({
+  priorityMetric: 'auto',  // Автоматический выбор метрики (ping/скорость/геолокация)
+  cacheTime: 1800000       // Кеширование результатов тестов на 30 минут
+});
+const smartNotifications = new SmartNotifications({
+  iconPath: path.join(__dirname, 'assets', 'icons', 'icon.png'),
+  enableQuietHours: true,
+  importanceThreshold: 2   // Показывать уведомления с важностью от 2 и выше
+});
 
 // Базовый URL для API
 const isDevelopment = process.env.NODE_ENV === 'development';
@@ -469,6 +494,41 @@ function setupVpnApi() {
         };
       }
       
+      // Проверяем, запрошен ли Kill Switch
+      const enableKillSwitch = params.enableKillSwitch === true;
+      if (enableKillSwitch) {
+        console.log('Kill Switch requested, enabling...');
+        try {
+          await killSwitch.enable();
+          console.log('Kill Switch enabled successfully');
+          // Отправим уведомление об активации Kill Switch
+          smartNotifications.notify({
+            title: 'Kill Switch активирован',
+            body: 'Интернет-трафик будет блокироваться при отключении VPN',
+            importance: 4,
+            category: 'security'
+          });
+        } catch (killSwitchError) {
+          console.error('Failed to enable Kill Switch:', killSwitchError);
+          // Продолжаем подключение даже если Kill Switch не удалось включить
+          smartNotifications.notify({
+            title: 'Не удалось активировать Kill Switch',
+            body: `Ошибка: ${killSwitchError.message}`,
+            importance: 5,
+            category: 'error'
+          });
+        }
+      }
+      
+      // Проверяем, запрошено ли Split Tunneling
+      const enableSplitTunneling = params.enableSplitTunneling === true;
+      let splitTunnelingEnabled = false;
+      if (enableSplitTunneling) {
+        console.log('Split Tunneling requested, preparing...');
+        // Split Tunneling будет активирован после успешного подключения VPN
+        splitTunnelingEnabled = true;
+      }
+      
       // Check if we're already connected
       if (isConnected && vpnProcess) {
         console.warn('Already connected to VPN, disconnecting first');
@@ -619,6 +679,82 @@ function setupVpnApi() {
             
             // Update connection status on server
             updateConnectionStatus(params.serverId, 'connected');
+            
+            // Активируем Split Tunneling если запрошено
+            if (splitTunnelingEnabled) {
+              splitTunneling.enable('tun0')
+                .then(splitResult => {
+                  console.log('Split Tunneling result:', splitResult);
+                  
+                  if (splitResult.success) {
+                    smartNotifications.notify({
+                      title: 'Split Tunneling активирован',
+                      body: 'Выборочная маршрутизация трафика включена',
+                      importance: 3,
+                      category: 'network'
+                    });
+                  } else {
+                    smartNotifications.notify({
+                      title: 'Ошибка Split Tunneling',
+                      body: splitResult.message,
+                      importance: 4,
+                      category: 'error'
+                    });
+                  }
+                })
+                .catch(splitError => {
+                  console.error('Error enabling Split Tunneling:', splitError);
+                  smartNotifications.notify({
+                    title: 'Ошибка Split Tunneling',
+                    body: `Не удалось активировать выборочную маршрутизацию: ${splitError.message}`,
+                    importance: 4,
+                    category: 'error'
+                  });
+                });
+            }
+            
+            // Запускаем систему автоматического переподключения
+            // Создаем информацию о текущем VPN-подключении
+            const vpnInfo = {
+              interface: 'tun0', // Стандартный интерфейс OpenVPN
+              config: {
+                path: configPath,
+                serverId: params.serverId,
+                connectionType: params.connectionType || 'fullVpn',
+                enableKillSwitch: enableKillSwitch,
+                enableSplitTunneling: splitTunnelingEnabled
+              }
+            };
+            
+            // Функция для переподключения
+            const reconnectCallback = async (config) => {
+              console.log('Reconnecting to VPN with config:', config);
+              // Используем тот же путь и создаем новый процесс
+              const reconnectProcess = spawn('wscript.exe', [elevateScriptPath], {
+                windowsHide: false,
+                detached: true,
+                stdio: 'ignore'
+              });
+              reconnectProcess.unref();
+              return true;
+            };
+            
+            // Запускаем мониторинг соединения
+            connectionStability.startMonitoring(vpnInfo, reconnectCallback)
+              .then(() => {
+                console.log('Connection stability monitoring enabled');
+                
+                // Уведомляем пользователя
+                smartNotifications.notify({
+                  title: 'Автоматическое переподключение активировано',
+                  body: 'VPN будет автоматически переподключаться при обрыве связи',
+                  importance: 3,
+                  category: 'network'
+                });
+              })
+              .catch(stabilityError => {
+                console.error('Error setting up connection stability:', stabilityError);
+              });
           }, 8000); // Allow 8 seconds for connection
           
           // Start checking connection status periodically
@@ -846,6 +982,45 @@ function setupVpnApi() {
           // Reset connection state
           isConnected = false;
           selectedServer = null;
+          
+          // Отключаем модули улучшения VPN
+          try {
+            // Останавливаем мониторинг соединения
+            connectionStability.stopMonitoring();
+            console.log('Connection stability monitoring stopped');
+            
+            // Отключаем Split Tunneling
+            splitTunneling.disable()
+              .then(result => {
+                console.log('Split Tunneling disabled successfully');
+              })
+              .catch(error => {
+                console.error('Error disabling Split Tunneling:', error);
+              });
+            
+            // Отключаем Kill Switch, если был включен
+            killSwitch.disable()
+              .then(() => {
+                console.log('Kill Switch disabled successfully');
+                smartNotifications.notify({
+                  title: 'Kill Switch отключен',
+                  body: 'Нормальный интернет-доступ восстановлен',
+                  importance: 3,
+                  category: 'security'
+                });
+              })
+              .catch(error => {
+                console.error('Error disabling Kill Switch:', error);
+                smartNotifications.notify({
+                  title: 'Ошибка отключения Kill Switch',
+                  body: `Не удалось восстановить нормальный доступ: ${error.message}`,
+                  importance: 5,
+                  category: 'error'
+                });
+              });
+          } catch (error) {
+            console.error('Error disabling VPN enhancement modules:', error);
+          }
           
           // Send disconnected event after a short delay
           setTimeout(() => {
@@ -1219,26 +1394,401 @@ function setupVpnApi() {
   // Handle auto-select-server request
   ipcMain.handle('auto-select-server', async () => {
     console.log('Auto-select server requested');
-    // Return mock result for testing
-    return { 
-      success: true, 
-      server: { 
-        _id: 'server2', 
-        name: 'Europe Server', 
-        location: 'Amsterdam', 
-        status: 'active',
-        analytics: {
-          activeConnections: 18,
-          loadAverage: 0.22
+    try {
+      // Получаем список серверов с сервера
+      const response = await axios.get(`${API_URL}/servers`, {
+        headers: authToken ? { 'Authorization': `Bearer ${authToken}` } : {}
+      });
+      
+      // Проверяем, что получили список серверов
+      if (!response.data || !response.data.servers || !Array.isArray(response.data.servers) || response.data.servers.length === 0) {
+        console.warn('No servers received from API, using fallback');
+        return { 
+          success: true, 
+          server: { 
+            _id: 'server2', 
+            name: 'Europe Server', 
+            location: 'Amsterdam', 
+            status: 'active',
+            analytics: {
+              activeConnections: 18,
+              loadAverage: 0.22
+            }
+          },
+          isFallback: true
+        };
+      }
+      
+      // Преобразуем данные серверов в формат, подходящий для ServerSelector
+      const servers = response.data.servers.map(server => ({
+        id: server._id,
+        name: server.name,
+        hostname: server.hostname || server.ip,
+        ip: server.ip,
+        location: server.location,
+        coordinates: server.coordinates,
+        load: server.analytics ? server.analytics.loadAverage * 100 : null,
+        status: server.status
+      }));
+      
+      // Фильтруем только активные серверы
+      const activeServers = servers.filter(server => server.status === 'active');
+      
+      if (activeServers.length === 0) {
+        console.warn('No active servers found, using first server from list');
+        return { 
+          success: true, 
+          server: response.data.servers[0],
+          isActive: false
+        };
+      }
+      
+      // Используем ServerSelector для выбора оптимального сервера
+      const result = await serverSelector.selectBestServer(activeServers);
+      
+      // Находим соответствующий сервер из оригинального списка
+      const selectedServer = response.data.servers.find(server => server._id === result.server.id);
+      
+      if (!selectedServer) {
+        console.warn(`Selected server ${result.server.id} not found in original list`);
+        return { 
+          success: true, 
+          server: response.data.servers[0],
+          isSelected: false
+        };
+      }
+      
+      console.log(`Auto-selected server: ${selectedServer.name} (${selectedServer.location})`);
+      return { 
+        success: true, 
+        server: selectedServer,
+        metrics: result.metrics,
+        selectionCriteria: {
+          ping: result.metrics.ping || 'N/A',
+          location: result.metrics.locationScore || 'N/A',
+          load: result.metrics.loadScore || 'N/A'
         }
-      } 
-    };
+      };
+    } catch (error) {
+      console.error('Error during server auto-selection:', error);
+      // Return fallback data in case of error
+      return { 
+        success: true, 
+        server: { 
+          _id: 'server2', 
+          name: 'Europe Server', 
+          location: 'Amsterdam', 
+          status: 'active',
+          analytics: {
+            activeConnections: 18,
+            loadAverage: 0.22
+          }
+        },
+        error: error.message,
+        isFallback: true
+      };
+    }
   });
   
   // Handle update-connection-status request
   ipcMain.handle('update-connection-status', async (event, params) => {
     console.log('Connection status update requested:', params);
     return { success: true };
+  });
+  
+  // Handle logout request
+  ipcMain.handle('logout', async () => {
+    console.log('Logout requested');
+    try {
+      // Reset authentication state
+      authState = {
+        isAuthenticated: false,
+        user: null,
+        token: null
+      };
+      authToken = null;
+      
+      // Remove saved token file
+      try {
+        const tokenPath = path.join(app.getPath('userData'), 'auth.json');
+        if (fs.existsSync(tokenPath)) {
+          fs.unlinkSync(tokenPath);
+          console.log('Auth token file removed');
+        }
+      } catch (fileError) {
+        console.error('Error removing token file:', fileError);
+      }
+      
+      return { success: true, message: 'Successfully logged out' };
+    } catch (error) {
+      console.error('Error during logout:', error);
+      return { success: false, error: error.message };
+    }
+  });
+  
+  // Handle kill-switch-toggle request
+  ipcMain.handle('kill-switch-toggle', async (event, enable) => {
+    console.log(`Kill Switch toggle requested: ${enable ? 'enable' : 'disable'}`);
+    
+    try {
+      if (enable) {
+        // Включение Kill Switch
+        await killSwitch.enable();
+        
+        smartNotifications.notify({
+          title: 'Kill Switch активирован',
+          body: 'Интернет-трафик будет блокироваться при отключении VPN',
+          importance: 4,
+          category: 'security'
+        });
+        
+        return { 
+          success: true, 
+          message: 'Kill Switch успешно активирован',
+          status: 'enabled'
+        };
+      } else {
+        // Отключение Kill Switch
+        await killSwitch.disable();
+        
+        smartNotifications.notify({
+          title: 'Kill Switch отключен',
+          body: 'Нормальный интернет-доступ восстановлен',
+          importance: 3,
+          category: 'security'
+        });
+        
+        return { 
+          success: true, 
+          message: 'Kill Switch успешно отключен',
+          status: 'disabled'
+        };
+      }
+    } catch (error) {
+      console.error('Error toggling Kill Switch:', error);
+      
+      smartNotifications.notify({
+        title: 'Ошибка управления Kill Switch',
+        body: `Не удалось ${enable ? 'активировать' : 'отключить'} Kill Switch: ${error.message}`,
+        importance: 5,
+        category: 'error'
+      });
+      
+      return { 
+        success: false, 
+        error: error.message,
+        status: 'error'
+      };
+    }
+  });
+  
+  // Handle split-tunneling-toggle request
+  ipcMain.handle('split-tunneling-toggle', async (event, enable) => {
+    console.log(`Split Tunneling toggle requested: ${enable ? 'enable' : 'disable'}`);
+    
+    try {
+      if (enable) {
+        // Проверяем, активно ли VPN-соединение
+        if (!isConnected) {
+          return {
+            success: false,
+            error: 'Необходимо сначала подключиться к VPN для активации Split Tunneling',
+            status: 'not_connected'
+          };
+        }
+        
+        // Включение Split Tunneling
+        const result = await splitTunneling.enable('tun0');
+        
+        if (result.success) {
+          smartNotifications.notify({
+            title: 'Split Tunneling активирован',
+            body: 'Выборочная маршрутизация трафика включена',
+            importance: 3,
+            category: 'network'
+          });
+          
+          return { 
+            success: true, 
+            message: 'Split Tunneling успешно активирован',
+            status: 'enabled'
+          };
+        } else {
+          return {
+            success: false,
+            error: result.message,
+            status: 'error'
+          };
+        }
+      } else {
+        // Отключение Split Tunneling
+        const result = await splitTunneling.disable();
+        
+        if (result.success) {
+          smartNotifications.notify({
+            title: 'Split Tunneling отключен',
+            body: 'Выборочная маршрутизация трафика отключена',
+            importance: 3,
+            category: 'network'
+          });
+          
+          return { 
+            success: true, 
+            message: 'Split Tunneling успешно отключен',
+            status: 'disabled'
+          };
+        } else {
+          return {
+            success: false,
+            error: result.message,
+            status: 'error'
+          };
+        }
+      }
+    } catch (error) {
+      console.error('Error toggling Split Tunneling:', error);
+      
+      smartNotifications.notify({
+        title: 'Ошибка управления Split Tunneling',
+        body: `Не удалось ${enable ? 'активировать' : 'отключить'} выборочную маршрутизацию: ${error.message}`,
+        importance: 4,
+        category: 'error'
+      });
+      
+      return { 
+        success: false, 
+        error: error.message,
+        status: 'error'
+      };
+    }
+  });
+  
+  // Handle split-tunneling-add-domain request
+  ipcMain.handle('split-tunneling-add-domain', async (event, domain) => {
+    console.log(`Adding domain to Split Tunneling bypass: ${domain}`);
+    
+    try {
+      const result = await splitTunneling.addDomainToBypass(domain);
+      
+      if (result.success) {
+        smartNotifications.notify({
+          title: 'Домен добавлен',
+          body: `Домен ${domain} добавлен в список обхода VPN`,
+          importance: 3,
+          category: 'network'
+        });
+      }
+      
+      return result;
+    } catch (error) {
+      console.error('Error adding domain to bypass list:', error);
+      return { 
+        success: false, 
+        error: error.message 
+      };
+    }
+  });
+  
+  // Handle split-tunneling-remove-domain request
+  ipcMain.handle('split-tunneling-remove-domain', async (event, domain) => {
+    console.log(`Removing domain from Split Tunneling bypass: ${domain}`);
+    
+    try {
+      const result = await splitTunneling.removeDomainFromBypass(domain);
+      
+      if (result.success) {
+        smartNotifications.notify({
+          title: 'Домен удален',
+          body: `Домен ${domain} удален из списка обхода VPN`,
+          importance: 3,
+          category: 'network'
+        });
+      }
+      
+      return result;
+    } catch (error) {
+      console.error('Error removing domain from bypass list:', error);
+      return { 
+        success: false, 
+        error: error.message 
+      };
+    }
+  });
+  
+  // Handle split-tunneling-config request
+  ipcMain.handle('split-tunneling-config', async () => {
+    console.log('Split Tunneling configuration requested');
+    
+    try {
+      const config = splitTunneling.getConfiguration();
+      return { 
+        success: true, 
+        config: config
+      };
+    } catch (error) {
+      console.error('Error getting Split Tunneling configuration:', error);
+      return { 
+        success: false, 
+        error: error.message 
+      };
+    }
+  });
+  
+  // Handle force-test-servers request
+  ipcMain.handle('force-test-servers', async () => {
+    console.log('Force testing servers requested');
+    
+    try {
+      // Получаем список серверов с сервера
+      const response = await axios.get(`${API_URL}/servers`, {
+        headers: authToken ? { 'Authorization': `Bearer ${authToken}` } : {}
+      });
+      
+      if (!response.data || !response.data.servers || !Array.isArray(response.data.servers)) {
+        return { 
+          success: false, 
+          error: 'Не удалось получить список серверов' 
+        };
+      }
+      
+      // Преобразуем данные серверов в формат, подходящий для ServerSelector
+      const servers = response.data.servers.map(server => ({
+        id: server._id,
+        name: server.name,
+        hostname: server.hostname || server.ip,
+        ip: server.ip,
+        location: server.location,
+        coordinates: server.coordinates,
+        load: server.analytics ? server.analytics.loadAverage * 100 : null,
+        status: server.status
+      }));
+      
+      // Фильтруем только активные серверы
+      const activeServers = servers.filter(server => server.status === 'active');
+      
+      if (activeServers.length === 0) {
+        return { 
+          success: false, 
+          error: 'Нет активных серверов для тестирования' 
+        };
+      }
+      
+      // Запускаем тестирование серверов
+      const results = await serverSelector.forceTestServers(activeServers);
+      
+      return { 
+        success: true, 
+        results: results,
+        timestamp: Date.now(),
+        message: 'Тестирование серверов завершено успешно'
+      };
+    } catch (error) {
+      console.error('Error force testing servers:', error);
+      return { 
+        success: false, 
+        error: error.message 
+      };
+    }
   });
 }
 
