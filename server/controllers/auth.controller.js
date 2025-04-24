@@ -188,6 +188,7 @@ exports.verifyActivation = async (req, res) => {
       return res.status(200).json({
         success: true,
         isActive: isValid,
+        email: user.email, // Добавляем email для проверки соответствия
         activationDate: user.activationDate,
         expirationDate: user.expirationDate,
         message: isValid ? 'Ключ активации действителен' : 'Ключ активации недействителен'

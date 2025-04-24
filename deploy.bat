@@ -10,7 +10,8 @@ REM Подключение к серверу и выполнение коман�
 echo Подключение к серверу %SERVER%...
 echo Выполнение команд обновления в директории %PROJECT_PATH%...
 
-ssh root@%SERVER% "cd %PROJECT_PATH% && git pull && echo 'Обновление кода из репозитория завершено!' && npm install && echo 'Установка зависимостей завершена!' && docker-compose down && echo 'Предыдущие контейнеры остановлены' && docker-compose build && echo 'Образы пересобраны' && docker-compose up -d && echo 'Контейнеры успешно запущены в фоновом режиме!'"
+REM Обработка неотслеживаемых файлов и обновление проекта
+ssh root@%SERVER% "cd %PROJECT_PATH% && git stash -u || true && rm -f package.json.bak package-lock.json.bak && [ -f package.json ] && mv package.json package.json.bak || true && [ -f package-lock.json ] && mv package-lock.json package-lock.json.bak || true && git pull && [ -f package.json.bak ] && mv package.json.bak package.json || true && [ -f package-lock.json.bak ] && mv package-lock.json.bak package-lock.json || true && npm install && docker-compose down && docker-compose build && docker-compose up -d && echo 'Деплой успешно завершен!'"
 
 if %ERRORLEVEL% EQU 0 (
     echo.
