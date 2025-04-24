@@ -31,6 +31,15 @@ const upload = multer({
   }
 });
 
+// Middleware для обработки ошибок превышения лимита запросов
+const rateLimitErrorHandler = (req, res, next) => {
+  res.status(429).json({
+    error: 'Too many requests',
+    message: 'Слишком много запросов. Пожалуйста, повторите позже.',
+    retryAfter: 60
+  });
+};
+
 // Публичные маршруты с разными форматами URL (для совместимости с клиентом)
 router.get('/public', serverController.getAllServers);
 router.get('-public', serverController.getAllServers); // New hyphenated route to match client request
@@ -50,9 +59,10 @@ router.post('/analytics/update', authMiddleware, serverController.updateConnecti
 // Получение информации о конкретном сервере
 router.get('/:id', serverController.getServerById);
 
-// Добавление нового сервера
+// Добавление нового сервера - защищено авторизацией
 router.post(
   '/',
+  authMiddleware,
   upload.fields([
     { name: 'antizapretConfig', maxCount: 1 },
     { name: 'fullVpnConfig', maxCount: 1 }
@@ -63,9 +73,10 @@ router.post(
   serverController.addServer
 );
 
-// Обновление сервера
+// Обновление сервера - защищено авторизацией
 router.put(
   '/:id',
+  authMiddleware,
   upload.fields([
     { name: 'antizapretConfig', maxCount: 1 },
     { name: 'fullVpnConfig', maxCount: 1 }
@@ -73,8 +84,8 @@ router.put(
   serverController.updateServer
 );
 
-// Удаление сервера
-router.delete('/:id', serverController.deleteServer);
+// Удаление сервера - защищено авторизацией
+router.delete('/:id', authMiddleware, serverController.deleteServer);
 
 // Получение конфигурационного файла Antizapret
 router.get('/:id/antizapret-config', serverController.getAntizapretConfig);

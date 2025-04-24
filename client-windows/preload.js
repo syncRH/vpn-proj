@@ -87,6 +87,44 @@ function checkOpenVPNInstalled() {
   return false;
 }
 
+// Function to normalize rate limit error messages for display
+function normalizeRateLimitError(error) {
+  if (!error) return 'Неизвестная ошибка';
+  
+  let message = error.message || 'Превышен лимит запросов к серверу';
+  let retryAfter = null;
+  
+  // Extract retry information from error response if available
+  if (error.response && error.response.headers) {
+    const headers = error.response.headers;
+    if (headers['retry-after']) {
+      retryAfter = parseInt(headers['retry-after'], 10);
+    } else if (headers['ratelimit-reset']) {
+      retryAfter = parseInt(headers['ratelimit-reset'], 10);
+    }
+  }
+  
+  // If retryAfter is available, format a friendly message
+  if (retryAfter) {
+    const minutes = Math.floor(retryAfter / 60);
+    const seconds = retryAfter % 60;
+    let timeString = '';
+    
+    if (minutes > 0) {
+      timeString = `${minutes} мин. ${seconds} сек.`;
+    } else {
+      timeString = `${seconds} сек.`;
+    }
+    
+    message = `Сервер временно недоступен. Повторная попытка через ${timeString}`;
+  }
+  
+  return {
+    message,
+    retryAfter
+  };
+}
+
 // Экспортируем API для рендерера
 const vpnAPI = {
   // Получение списка серверов
@@ -413,6 +451,67 @@ const vpnAPI = {
     return ipcRenderer.invoke('show-notification', notification);
   }
 };
+
+// Handler for rate limiting notifications from main process
+ipcRenderer.on('api-rate-limited', (_, data) => {
+  console.log('preload.js: получено уведомление о превышении лимита запросов:', data);
+  
+  const { retryDelay, retryCount, maxRetries, endpoint } = data;
+  
+  // Format user-friendly message
+  const minutes = Math.floor(retryDelay / 60);
+  const seconds = retryDelay % 60;
+  let timeString = '';
+  
+  if (minutes > 0) {
+    timeString = `${minutes} мин. ${seconds} сек.`;
+  } else {
+    timeString = `${seconds} сек.`;
+  }
+  
+  // Forward to renderer
+  const rateLimitInfo = {
+    message: `Превышен лимит запросов к серверу. Повторная попытка ${retryCount}/${maxRetries} через ${timeString}`,
+    retryDelay,
+    retryCount,
+    maxRetries,
+    endpoint
+  };
+  
+  // Send to all registered callbacks
+  window.dispatchEvent(new CustomEvent('vpn-rate-limited', { 
+    detail: rateLimitInfo
+  }));
+});
+
+// Handler for network error notifications from main process
+ipcRenderer.on('network-error', (_, data) => {
+  console.log('preload.js: получено уведомление о проблеме с сетью:', data);
+  
+  // Forward to renderer as a custom event
+  window.dispatchEvent(new CustomEvent('vpn-network-error', { 
+    detail: data
+  }));
+});
+
+// Improved rate limit handler with more context
+ipcRenderer.on('vpn-rate-limited', (_, data) => {
+  console.log('preload.js: получено уведомление о превышении лимита запросов для конкретного запроса:', data);
+  
+  // Forward to renderer with all details
+  window.dispatchEvent(new CustomEvent('vpn-rate-limited', { 
+    detail: data
+  }));
+});
+
+// Handler for global app state changes
+ipcRenderer.on('app-state-changed', (_, data) => {
+  console.log('preload.js: получено уведомление об изменении состояния приложения:', data);
+  
+  window.dispatchEvent(new CustomEvent('vpn-app-state-changed', { 
+    detail: data
+  }));
+});
 
 // Выводим доступные методы API
 console.log('Экспортируемые методы API:', Object.keys(vpnAPI).join(', '));

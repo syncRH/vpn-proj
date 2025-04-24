@@ -96,6 +96,16 @@ exports.login = async (req, res) => {
       console.log('Используем поле key вместо password:', password);
     }
     
+    // Проверка формата email - должен иметь формат xxx@xxx.xxx
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      console.log(`Недопустимый формат email: ${email}`);
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Недопустимый формат email. Пожалуйста, введите корректный email.' 
+      });
+    }
+    
     console.log('Запрос авторизации получен:', { 
       email, 
       password_provided: !!password,

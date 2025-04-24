@@ -335,11 +335,12 @@ exports.generateUserToken = async (req, res) => {
       });
     }
     
-    // Обновляем email пользователя, если он изменился
+    // Проверяем, соответствует ли предоставленный email тому, что зарегистрирован для активационного ключа
     if (user.email !== email) {
-      user.email = email;
-      await user.save();
-      console.log(`Обновлен email пользователя на ${email}`);
+      return res.status(401).json({
+        success: false,
+        message: 'Указанный email не соответствует ключу активации'
+      });
     }
     
     // Генерируем JWT токен

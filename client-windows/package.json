@@ -20,34 +20,57 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64", "ia32"]
+          "arch": [
+            "x64",
+            "ia32"
+          ]
         },
         {
           "target": "portable",
-          "arch": ["x64", "ia32"]
+          "arch": [
+            "x64",
+            "ia32"
+          ]
         }
       ],
-      "icon": "assets/icons/icon.ico",
+      "icon": "build/icon.ico",
       "artifactName": "${productName}-Setup-${version}-${arch}.${ext}",
-      "signAndEditExecutable": false
+      "signAndEditExecutable": true,
+      "signDlls": true,
+      "publisherName": "BeNice VPN Team",
+      "verifyUpdateCodeSignature": false,
+      "requestedExecutionLevel": "highestAvailable"
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "installerIcon": "assets/icons/icon.ico",
-      "uninstallerIcon": "assets/icons/icon.ico",
-      "license": "LICENSE",
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
       "runAfterFinish": true,
-      "artifactName": "${productName}-Setup-${version}-${arch}.${ext}"
+      "artifactName": "${productName}-Setup-${version}-${arch}.${ext}",
+      "include": "installer.nsh",
+      "shortcutName": "BeNice VPN",
+      "perMachine": true,
+      "displayLanguageSelector": false,
+      "installerLanguages": [
+        "en-US",
+        "ru-RU"
+      ],
+      "installerSidebar": "installerSidebar.bmp",
+      "deleteAppDataOnUninstall": false
     },
     "portable": {
       "artifactName": "${productName}-Portable-${version}-${arch}.${ext}"
     },
     "files": [
       "**/*",
-      "!**/*.{iml,o,hprof,orig,pyc,pyo,rbc,swp,csproj,sln,suo,xproj,cc,d.ts}"
+      "!**/*.{iml,o,hprof,orig,pyc,pyo,rbc,swp,csproj,sln,suo,xproj,cc,d.ts}",
+      "!**/.git",
+      "!**/.idea",
+      "!**/.vscode",
+      "!**/node_modules/.cache"
     ],
     "extraResources": [
       "assets/**"
@@ -56,23 +79,39 @@
     "asarUnpack": [
       "node_modules/openvpn-*/**/*"
     ],
-    "publish": {
-      "provider": "generic",
-      "url": "http://45.147.178.200:3000/downloads"
-    }
+    "fileAssociations": [],
+    "protocols": [
+      {
+        "name": "BeNice VPN Protocol",
+        "schemes": [
+          "benicevpn"
+        ]
+      }
+    ],
+    "publish": [
+      {
+        "provider": "generic",
+        "url": "https://api.benicevpn.com/downloads"
+      }
+    ]
   },
   "keywords": [
     "vpn",
     "client",
     "openvpn"
   ],
-  "author": "VPN Project Team",
+  "author": {
+    "name": "VPN Project Team",
+    "email": "support@benicevpn.com"
+  },
   "license": "MIT",
   "dependencies": {
-    "axios": "^1.6.2",
+    "auto-launch": "^5.0.6",
+    "axios": "^1.8.4",
     "bootstrap": "^5.3.2",
+    "electron-log": "^5.3.4",
     "electron-store": "^10.0.1",
-    "electron-updater": "^6.1.7",
+    "electron-updater": "^6.6.2",
     "react": "^18.2.0",
     "react-bootstrap": "^2.9.1",
     "react-dom": "^18.2.0",
@@ -80,6 +119,7 @@
   },
   "devDependencies": {
     "electron": "^26.3.0",
-    "electron-builder": "^24.6.4"
+    "electron-builder": "^24.6.4",
+    "electron-notarize": "^1.2.2"
   }
 }

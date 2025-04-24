@@ -28,6 +28,402 @@ const elements = {
   logoutBtn: document.getElementById('logout-btn')
 };
 
+// UI Elements for rate limiting feedback
+let rateLimitOverlay = null;
+let rateLimitMessage = null;
+let rateLimitProgress = null;
+
+// Create UI elements for rate limit feedback
+function createRateLimitUI() {
+  // If already created, return
+  if (rateLimitOverlay) return;
+  
+  // Create overlay container
+  rateLimitOverlay = document.createElement('div');
+  rateLimitOverlay.className = 'rate-limit-overlay';
+  rateLimitOverlay.style.display = 'none';
+  rateLimitOverlay.style.position = 'fixed';
+  rateLimitOverlay.style.top = '0';
+  rateLimitOverlay.style.left = '0';
+  rateLimitOverlay.style.width = '100%';
+  rateLimitOverlay.style.height = '100%';
+  rateLimitOverlay.style.backgroundColor = 'rgba(0, 0, 0, 0.7)';
+  rateLimitOverlay.style.zIndex = '9999';
+  rateLimitOverlay.style.display = 'flex';
+  rateLimitOverlay.style.flexDirection = 'column';
+  rateLimitOverlay.style.justifyContent = 'center';
+  rateLimitOverlay.style.alignItems = 'center';
+  rateLimitOverlay.style.padding = '20px';
+  rateLimitOverlay.style.color = 'white';
+  rateLimitOverlay.style.fontFamily = 'Arial, sans-serif';
+  
+  // Create message element
+  rateLimitMessage = document.createElement('div');
+  rateLimitMessage.style.fontSize = '18px';
+  rateLimitMessage.style.marginBottom = '20px';
+  rateLimitMessage.style.textAlign = 'center';
+  
+  // Create progress container
+  const progressContainer = document.createElement('div');
+  progressContainer.style.width = '80%';
+  progressContainer.style.maxWidth = '400px';
+  progressContainer.style.backgroundColor = '#444';
+  progressContainer.style.borderRadius = '4px';
+  progressContainer.style.overflow = 'hidden';
+  
+  // Create progress bar
+  rateLimitProgress = document.createElement('div');
+  rateLimitProgress.style.height = '10px';
+  rateLimitProgress.style.width = '0%';
+  rateLimitProgress.style.backgroundColor = '#4CAF50';
+  rateLimitProgress.style.transition = 'width 0.5s';
+  
+  // Assemble the UI
+  progressContainer.appendChild(rateLimitProgress);
+  rateLimitOverlay.appendChild(rateLimitMessage);
+  rateLimitOverlay.appendChild(progressContainer);
+  document.body.appendChild(rateLimitOverlay);
+  
+  rateLimitOverlay.style.display = 'none';
+}
+
+// Show rate limit overlay with countdown
+function showRateLimitOverlay(message, totalSeconds) {
+  createRateLimitUI();
+  
+  rateLimitMessage.textContent = message;
+  rateLimitProgress.style.width = '0%';
+  rateLimitOverlay.style.display = 'flex';
+  
+  let secondsLeft = totalSeconds;
+  const updateInterval = 100; // Update every 100ms for smoother progress
+  const totalUpdates = totalSeconds * (1000 / updateInterval);
+  let currentUpdate = 0;
+  
+  const countdownInterval = setInterval(() => {
+    currentUpdate++;
+    const progressPercent = (currentUpdate / totalUpdates) * 100;
+    rateLimitProgress.style.width = `${progressPercent}%`;
+    
+    // Update seconds display every whole second
+    if (currentUpdate % (1000 / updateInterval) === 0) {
+      secondsLeft--;
+      const minutes = Math.floor(secondsLeft / 60);
+      const seconds = secondsLeft % 60;
+      let timeString = '';
+      
+      if (minutes > 0) {
+        timeString = `${minutes} мин. ${seconds} сек.`;
+      } else {
+        timeString = `${seconds} сек.`;
+      }
+      
+      rateLimitMessage.textContent = message.replace(/\d+ сек\.|\d+ мин\. \d+ сек\./, timeString);
+    }
+    
+    if (currentUpdate >= totalUpdates) {
+      clearInterval(countdownInterval);
+      hideRateLimitOverlay();
+    }
+  }, updateInterval);
+  
+  // Store the interval ID to clear it if needed
+  rateLimitOverlay.dataset.intervalId = countdownInterval;
+}
+
+// Hide rate limit overlay
+function hideRateLimitOverlay() {
+  if (rateLimitOverlay) {
+    rateLimitOverlay.style.display = 'none';
+    
+    // Clear any existing interval
+    if (rateLimitOverlay.dataset.intervalId) {
+      clearInterval(parseInt(rateLimitOverlay.dataset.intervalId));
+    }
+  }
+}
+
+// Listen for rate limit events from the main process
+window.addEventListener('vpn-rate-limited', (event) => {
+  const { message, retryDelay } = event.detail;
+  
+  console.log('Rate limit detected:', message);
+  showRateLimitOverlay(message, retryDelay);
+  
+  // Also show a notification if available
+  if (window.vpnAPI && window.vpnAPI.showNotification) {
+    window.vpnAPI.showNotification({
+      title: 'Превышен лимит запросов',
+      body: 'Пожалуйста, подождите. Приложение автоматически повторит запрос.'
+    });
+  }
+});
+
+// Добавляем слушатель для отображения ошибок при превышении лимита запросов в UI
+window.addEventListener('vpn-rate-limited', (event) => {
+  const { endpoint, retryDelay, retryCount, maxRetries, isAuthRequest, isServerRequest } = event.detail;
+  
+  // Получаем элемент для отображения информации о превышении лимита
+  const connectionStatusEl = document.getElementById('connection-status');
+  const serverListEl = document.getElementById('server-list');
+  const notificationEl = document.getElementById('notification');
+  
+  // Создаем сообщение для пользователя
+  let message = `Превышен лимит запросов. Повторная попытка через ${retryDelay} сек.`;
+  
+  if (isAuthRequest) {
+    message = `Превышен лимит попыток входа. Повторная попытка через ${retryDelay} сек.`;
+    
+    // Если есть элемент для ошибок авторизации, обновляем его
+    const authErrorEl = document.getElementById('auth-error');
+    if (authErrorEl) {
+      authErrorEl.textContent = message;
+      authErrorEl.style.display = 'block';
+    }
+  } else if (isServerRequest) {
+    message = `Превышен лимит запросов к серверам. Данные будут обновлены через ${retryDelay} сек.`;
+    
+    // Если есть элемент списка серверов, показываем предупреждение
+    if (serverListEl) {
+      const warningEl = document.createElement('div');
+      warningEl.className = 'server-list-warning';
+      warningEl.textContent = message;
+      
+      // Удаляем предыдущие предупреждения
+      const existingWarnings = serverListEl.querySelectorAll('.server-list-warning');
+      existingWarnings.forEach(warning => warning.remove());
+      
+      // Добавляем новое предупреждение
+      serverListEl.prepend(warningEl);
+      
+      // Удаляем предупреждение после задержки
+      setTimeout(() => {
+        if (warningEl.parentNode === serverListEl) {
+          warningEl.remove();
+        }
+      }, retryDelay * 1000);
+    }
+  }
+  
+  // Если у нас есть элемент для общих уведомлений, показываем информацию там
+  if (notificationEl) {
+    notificationEl.textContent = message;
+    notificationEl.className = 'notification warning';
+    notificationEl.style.display = 'block';
+    
+    // Скрываем уведомление после задержки
+    setTimeout(() => {
+      notificationEl.style.display = 'none';
+    }, Math.min(retryDelay * 1000, 5000)); // не более 5 секунд или до следующей попытки
+  }
+  
+  // Добавляем запись в лог
+  addLogEntry(`[ОГРАНИЧЕНИЕ] ${message}`);
+});
+
+// Прослушиватель событий для обработки ограничений запросов (rate limits)
+window.addEventListener('vpn-rate-limited', (event) => {
+  const { detail } = event;
+  
+  // Получаем данные о превышении лимита запросов
+  const {
+    endpoint,
+    retryDelay,
+    retryCount,
+    maxRetries,
+    isAuthRequest,
+    isServerRequest,
+    message
+  } = detail;
+  
+  console.log(`Получено уведомление о превышении лимита запросов для ${endpoint}`);
+  
+  // Создаем или обновляем элемент уведомления о превышении лимита запросов
+  let rateNotification = document.getElementById('rate-limit-notification');
+  
+  if (!rateNotification) {
+    // Создаем новый элемент уведомления
+    rateNotification = document.createElement('div');
+    rateNotification.id = 'rate-limit-notification';
+    rateNotification.className = 'notification rate-limit-notification';
+    document.body.appendChild(rateNotification);
+  }
+  
+  // Определяем тип запроса для более информативного сообщения
+  let requestType = 'API';
+  if (isAuthRequest) requestType = 'авторизации';
+  if (isServerRequest) requestType = 'серверов';
+  if (endpoint.includes('connect')) requestType = 'подключения';
+  
+  // Формируем сообщение
+  let notificationMessage = message || 
+    `Превышен лимит запросов ${requestType}. Повторная попытка ${retryCount}/${maxRetries} через ${retryDelay} сек.`;
+  
+  // Обновляем содержимое уведомления
+  rateNotification.innerHTML = `
+    <div class="notification-header">
+      <span class="notification-icon">⚠️</span>
+      <span class="notification-title">Ограничение запросов</span>
+      <span class="notification-close" onclick="this.parentElement.parentElement.style.display='none'">×</span>
+    </div>
+    <div class="notification-body">
+      <p>${notificationMessage}</p>
+      <div class="progress-bar">
+        <div class="progress-fill" id="rate-limit-progress"></div>
+      </div>
+    </div>
+  `;
+  
+  // Показываем уведомление
+  rateNotification.style.display = 'block';
+  
+  // Запускаем анимацию прогресса
+  const progressFill = document.getElementById('rate-limit-progress');
+  if (progressFill) {
+    progressFill.style.width = '0%';
+    progressFill.style.transition = `width ${retryDelay}s linear`;
+    
+    // Небольшая задержка чтобы CSS транзиция сработала корректно
+    setTimeout(() => {
+      progressFill.style.width = '100%';
+    }, 50);
+    
+    // Скрываем уведомление после завершения ожидания
+    setTimeout(() => {
+      rateNotification.style.display = 'none';
+    }, retryDelay * 1000);
+  }
+  
+  // Обновляем состояние UI в зависимости от типа запроса
+  if (isAuthRequest) {
+    // Для ошибок авторизации показываем уведомление в форме логина
+    const loginError = document.getElementById('login-error');
+    if (loginError) {
+      loginError.textContent = 'Слишком много попыток входа. Пожалуйста, подождите.';
+      loginError.style.display = 'block';
+    }
+    
+    // Отключаем кнопку входа на время ожидания
+    const loginButton = document.querySelector('#login-form button[type="submit"]');
+    if (loginButton) {
+      loginButton.disabled = true;
+      setTimeout(() => {
+        loginButton.disabled = false;
+      }, retryDelay * 1000);
+    }
+  } else if (isServerRequest) {
+    // Для запросов серверов показываем информацию в соответствующем разделе
+    const serverList = document.getElementById('server-list');
+    if (serverList) {
+      const loadingMessage = document.createElement('div');
+      loadingMessage.className = 'server-loading-message';
+      loadingMessage.textContent = `Загрузка серверов будет доступна через ${retryDelay} сек.`;
+      
+      // Добавляем сообщение только если его еще нет
+      if (!serverList.querySelector('.server-loading-message')) {
+        serverList.appendChild(loadingMessage);
+        
+        // Удаляем сообщение после завершения ожидания
+        setTimeout(() => {
+          loadingMessage.remove();
+        }, retryDelay * 1000);
+      }
+    }
+  }
+});
+
+// Прослушиватель событий для обработки сетевых ошибок
+window.addEventListener('vpn-network-error', (event) => {
+  const { detail } = event;
+  
+  // Создаем и показываем уведомление о сетевой ошибке
+  showNotification({
+    title: 'Ошибка сети',
+    message: detail.error || 'Проблема с сетевым подключением',
+    type: 'error',
+    duration: 10000
+  });
+  
+  // Если это критичный запрос, показываем дополнительную информацию
+  if (detail.isAuthRequest || detail.isServerRequest) {
+    const networkErrorBar = document.createElement('div');
+    networkErrorBar.className = 'network-error-bar';
+    networkErrorBar.innerHTML = `
+      <span>⚠️ Проблемы с подключением к серверу. Проверьте интернет.</span>
+      <button onclick="window.location.reload()">Обновить</button>
+    `;
+    
+    // Добавляем в начало body, если такого элемента еще нет
+    if (!document.querySelector('.network-error-bar')) {
+      document.body.insertBefore(networkErrorBar, document.body.firstChild);
+    }
+  }
+});
+
+// Функция для отображения универсальных уведомлений
+function showNotification(options) {
+  const {
+    title = 'Уведомление',
+    message = '',
+    type = 'info',  // info, success, warning, error
+    duration = 5000 // миллисекунды
+  } = options;
+  
+  // Создаем элемент уведомления
+  const notification = document.createElement('div');
+  notification.className = `notification notification-${type}`;
+  
+  // Заполняем содержимое
+  notification.innerHTML = `
+    <div class="notification-header">
+      <span class="notification-icon">${getIconForType(type)}</span>
+      <span class="notification-title">${title}</span>
+      <span class="notification-close" onclick="this.parentElement.parentElement.remove()">×</span>
+    </div>
+    <div class="notification-body">
+      <p>${message}</p>
+    </div>
+  `;
+  
+  // Функция для получения иконки в зависимости от типа уведомления
+  function getIconForType(type) {
+    switch(type) {
+      case 'success': return '✅';
+      case 'warning': return '⚠️';
+      case 'error': return '❌';
+      default: return 'ℹ️';
+    }
+  }
+  
+  // Добавляем в контейнер уведомлений или создаем его
+  let notificationsContainer = document.getElementById('notifications-container');
+  
+  if (!notificationsContainer) {
+    notificationsContainer = document.createElement('div');
+    notificationsContainer.id = 'notifications-container';
+    document.body.appendChild(notificationsContainer);
+  }
+  
+  // Добавляем уведомление
+  notificationsContainer.appendChild(notification);
+  
+  // Устанавливаем таймер для автоматического скрытия
+  if (duration > 0) {
+    setTimeout(() => {
+      notification.classList.add('notification-fadeout');
+      
+      // Удаляем элемент после анимации
+      setTimeout(() => {
+        notification.remove();
+      }, 500); // Время анимации
+      
+    }, duration);
+  }
+  
+  // Возвращаем элемент для возможных дальнейших манипуляций
+  return notification;
+}
+
 // Добавляем запись в лог
 function addLogEntry(message) {
   const logEntry = document.createElement('div');

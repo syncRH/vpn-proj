@@ -4,6 +4,7 @@ const { validationResult } = require('express-validator');
 const Server = require('../models/server.model');
 const { exec } = require('child_process');
 const util = require('util');
+const rateLimit = require('express-rate-limit'); // Add this for rate limiting
 
 // Преобразуем функцию exec в промис
 const execPromise = util.promisify(exec);
@@ -11,6 +12,113 @@ const execPromise = util.promisify(exec);
 // Map to track unique client connections to servers
 // Key: serverId_clientId, Value: connection timestamp
 const activeConnectionsMap = new Map();
+
+// Rate limiter storage for IP addresses
+const ipLimiterMap = new Map();
+
+// Rate limiter configurations
+const rateLimitConfig = {
+  standard: {
+    windowMs: 60 * 1000, // 1 minute window
+    maxRequests: 60,     // 60 requests per minute
+    message: 'Превышен лимит запросов. Пожалуйста, повторите через 60 секунд.'
+  },
+  serverConfig: {
+    windowMs: 30 * 1000, // 30 seconds window
+    maxRequests: 15,     // 15 requests per 30 seconds
+    message: 'Превышен лимит запросов на получение конфигурации. Пожалуйста, повторите через 30 секунд.'
+  },
+  analytics: {
+    windowMs: 2 * 60 * 1000, // 2 minute window
+    maxRequests: 20,         // 20 requests per 2 minutes
+    message: 'Превышен лимит запросов аналитики. Пожалуйста, повторите через 2 минуты.'
+  }
+};
+
+// Helper function to check rate limit
+function checkRateLimit(ip, limitType) {
+  const config = rateLimitConfig[limitType] || rateLimitConfig.standard;
+  const now = Date.now();
+  const key = `${ip}:${limitType}`;
+  
+  // Initialize if this IP hasn't been seen for this limit type
+  if (!ipLimiterMap.has(key)) {
+    ipLimiterMap.set(key, {
+      count: 0,
+      resetAt: now + config.windowMs,
+      windowMs: config.windowMs
+    });
+  }
+  
+  let limiter = ipLimiterMap.get(key);
+  
+  // Reset counter if the window has passed
+  if (now > limiter.resetAt) {
+    limiter = {
+      count: 0,
+      resetAt: now + config.windowMs,
+      windowMs: config.windowMs
+    };
+    ipLimiterMap.set(key, limiter);
+  }
+  
+  // Increment and check
+  limiter.count++;
+  
+  if (limiter.count > config.maxRequests) {
+    // Calculate time to wait in seconds
+    const waitTimeSeconds = Math.ceil((limiter.resetAt - now) / 1000);
+    return {
+      limited: true,
+      message: config.message,
+      retryAfter: waitTimeSeconds,
+      remainingRequests: 0
+    };
+  }
+  
+  return {
+    limited: false,
+    remainingRequests: config.maxRequests - limiter.count,
+    resetAt: limiter.resetAt
+  };
+}
+
+// Middleware to apply rate limiting
+function applyRateLimit(req, res, next, limitType = 'standard') {
+  const ip = req.ip || req.connection.remoteAddress;
+  const result = checkRateLimit(ip, limitType);
+  
+  if (result.limited) {
+    // Set proper headers for rate limiting
+    res.setHeader('Retry-After', result.retryAfter);
+    res.setHeader('X-RateLimit-Limit', rateLimitConfig[limitType].maxRequests);
+    res.setHeader('X-RateLimit-Remaining', 0);
+    res.setHeader('X-RateLimit-Reset', Math.ceil(Date.now() / 1000) + result.retryAfter);
+    
+    return res.status(429).json({
+      error: 'Too many requests',
+      message: result.message,
+      retryAfter: result.retryAfter
+    });
+  }
+  
+  // Set headers for non-limited requests too
+  res.setHeader('X-RateLimit-Limit', rateLimitConfig[limitType].maxRequests);
+  res.setHeader('X-RateLimit-Remaining', result.remainingRequests);
+  res.setHeader('X-RateLimit-Reset', Math.ceil(result.resetAt / 1000));
+  
+  next();
+}
+
+// Cleanup stale IP rate limit data periodically (every 10 minutes)
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, limiter] of ipLimiterMap.entries()) {
+    if (now > limiter.resetAt + 60000) { // Keep entries for 1 minute past reset
+      ipLimiterMap.delete(key);
+    }
+  }
+}, 10 * 60 * 1000);
 
 // Helper function to get active connection count for a server
 function getActiveConnectionCount(serverId) {
@@ -632,42 +740,46 @@ exports.deleteServer = async (req, res) => {
 
 // Получение конфигурационного файла Antizapret
 exports.getAntizapretConfig = async (req, res) => {
-  try {
-    const server = await Server.findById(req.params.id);
-    
-    if (!server) {
-      return res.status(404).json({ message: 'Сервер не найден' });
+  applyRateLimit(req, res, async () => {
+    try {
+      const server = await Server.findById(req.params.id);
+      
+      if (!server) {
+        return res.status(404).json({ message: 'Сервер не найден' });
+      }
+      
+      if (!server.isActive) {
+        return res.status(403).json({ message: 'Сервер не активен' });
+      }
+      
+      res.status(200).send(server.antizapretConfig);
+    } catch (error) {
+      console.error('Ошибка получения конфигурации Antizapret:', error);
+      res.status(500).json({ message: 'Ошибка сервера при получении конфигурации' });
     }
-    
-    if (!server.isActive) {
-      return res.status(403).json({ message: 'Сервер не активен' });
-    }
-    
-    res.status(200).send(server.antizapretConfig);
-  } catch (error) {
-    console.error('Ошибка получения конфигурации Antizapret:', error);
-    res.status(500).json({ message: 'Ошибка сервера при получении конфигурации' });
-  }
+  }, 'serverConfig');
 };
 
 // Получение конфигурационного файла полного VPN
 exports.getFullVpnConfig = async (req, res) => {
-  try {
-    const server = await Server.findById(req.params.id);
-    
-    if (!server) {
-      return res.status(404).json({ message: 'Сервер не найден' });
+  applyRateLimit(req, res, async () => {
+    try {
+      const server = await Server.findById(req.params.id);
+      
+      if (!server) {
+        return res.status(404).json({ message: 'Сервер не найден' });
+      }
+      
+      if (!server.isActive) {
+        return res.status(403).json({ message: 'Сервер не активен' });
+      }
+      
+      res.status(200).send(server.fullVpnConfig);
+    } catch (error) {
+      console.error('Ошибка получения конфигурации полного VPN:', error);
+      res.status(500).json({ message: 'Ошибка сервера при получении конфигурации' });
     }
-    
-    if (!server.isActive) {
-      return res.status(403).json({ message: 'Сервер не активен' });
-    }
-    
-    res.status(200).send(server.fullVpnConfig);
-  } catch (error) {
-    console.error('Ошибка получения конфигурации полного VPN:', error);
-    res.status(500).json({ message: 'Ошибка сервера при получении конфигурации' });
-  }
+  }, 'serverConfig');
 };
 
 // Add server connection tracking endpoints
@@ -732,38 +844,40 @@ exports.recordServerDisconnect = async (req, res) => {
 
 // Получение аналитики серверов
 exports.getAnalytics = async (req, res) => {
-  try {
-    // Get all servers with their connection data
-    const servers = await Server.find().select('_id name ipAddress activeConnections maxConnections country city');
-    
-    // Calculate additional analytics for each server
-    const serversWithAnalytics = servers.map(server => {
-      // Calculate load percentage (default max connections to 100 if not specified)
-      const maxConnections = server.maxConnections || 100;
-      const load = Math.floor((server.activeConnections / maxConnections) * 100);
+  applyRateLimit(req, res, async () => {
+    try {
+      // Get all servers with their connection data
+      const servers = await Server.find().select('_id name ipAddress activeConnections maxConnections country city');
       
-      return {
-        _id: server._id,
-        name: server.name,
-        ipAddress: server.ipAddress,
-        country: server.country,
-        city: server.city,
-        activeConnections: server.activeConnections || 0,
-        maxConnections: maxConnections,
-        load: load > 100 ? 100 : load, // Cap at 100%
-        isActive: server.isActive
-      };
-    });
-    
-    res.status(200).json({ 
-      servers: serversWithAnalytics,
-      totalServers: serversWithAnalytics.length,
-      totalConnections: serversWithAnalytics.reduce((sum, server) => sum + (server.activeConnections || 0), 0)
-    });
-  } catch (error) {
-    console.error('Ошибка при получении аналитики серверов:', error);
-    res.status(500).json({ message: 'Ошибка сервера при получении аналитики' });
-  }
+      // Calculate additional analytics for each server
+      const serversWithAnalytics = servers.map(server => {
+        // Calculate load percentage (default max connections to 100 if not specified)
+        const maxConnections = server.maxConnections || 100;
+        const load = Math.floor((server.activeConnections / maxConnections) * 100);
+        
+        return {
+          _id: server._id,
+          name: server.name,
+          ipAddress: server.ipAddress,
+          country: server.country,
+          city: server.city,
+          activeConnections: server.activeConnections || 0,
+          maxConnections: maxConnections,
+          load: load > 100 ? 100 : load, // Cap at 100%
+          isActive: server.isActive
+        };
+      });
+      
+      res.status(200).json({ 
+        servers: serversWithAnalytics,
+        totalServers: serversWithAnalytics.length,
+        totalConnections: serversWithAnalytics.reduce((sum, server) => sum + (server.activeConnections || 0), 0)
+      });
+    } catch (error) {
+      console.error('Ошибка при получении аналитики серверов:', error);
+      res.status(500).json({ message: 'Ошибка сервера при получении аналитики' });
+    }
+  }, 'analytics');
 };
 
 // Обновление статистики подключения клиентов

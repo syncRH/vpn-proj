@@ -21,8 +21,8 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const NODE_ENV = process.env.NODE_ENV || 'development';
 const CORS_ORIGIN = process.env.CORS_ORIGIN || '*';
-const RATE_LIMIT_WINDOW = process.env.RATE_LIMIT_WINDOW || 15;
-const RATE_LIMIT_MAX = process.env.RATE_LIMIT_MAX || 100;
+const RATE_LIMIT_WINDOW = process.env.RATE_LIMIT_WINDOW || 60; // увеличиваем до 60 минут
+const RATE_LIMIT_MAX = process.env.RATE_LIMIT_MAX || 5000; // значительно увеличиваем до 5000 запросов
 const LOGS_DIR = process.env.LOGS_DIR || './logs';
 
 // Настройка доверия к прокси для работы через Nginx
@@ -100,8 +100,35 @@ mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/vpn-servi
 const limiter = rateLimit({
   windowMs: RATE_LIMIT_WINDOW * 60 * 1000, // в минутах
   max: RATE_LIMIT_MAX, // максимальное количество запросов
-  standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
-  legacyHeaders: false, // Disable the `X-RateLimit-*` headers
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: 'Превышен лимит запросов, попробуйте позже или обратитесь к администратору'
+});
+
+// Создаем более мягкий лимитер для клиентских запросов
+const clientLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000, // 5 минут
+  max: 1000, // увеличиваем до 1000 запросов за 5 минут
+  standardHeaders: true,
+  legacyHeaders: false
+});
+
+// Создаем особо мягкий лимитер для критических операций
+const softLimiter = rateLimit({
+  windowMs: 1 * 60 * 1000, // 1 минута
+  max: 200, // 200 запросов в минуту
+  standardHeaders: true,
+  legacyHeaders: false,
+  skipSuccessfulRequests: true, // не считаем успешные запросы
+  skip: (req, res) => {
+    // Пропускаем проверку для запросов аутентификации
+    if (req.path.includes('/api/auth/login') || 
+        req.path.includes('/api/auth/user/token') ||
+        req.path.includes('/api/auth/user/register')) {
+      return true;
+    }
+    return false;
+  }
 });
 
 // Middleware
@@ -116,9 +143,24 @@ app.use(cors({
 // Производительность
 app.use(compression()); // Сжатие ответов
 
-// Ограничение запросов
-app.use(limiter);
-console.log('Rate limiter middleware applied.');
+// Применяем разные лимиты для разных путей вместо глобального ограничения
+// Более жесткие ограничения только для административных маршрутов
+app.use('/api/auth/admin', limiter);
+app.use('/api/dashboard', limiter);
+
+// Для публичных API применяем мягкий лимитер
+app.use('/api/servers/public', softLimiter);
+app.use('/api/servers-public', softLimiter);
+
+// Для большинства маршрутов аутентификации пользователей НЕ применяем лимитер
+// Особые пути (/api/auth/login, /api/auth/user/token, /api/auth/user/register) полностью исключены из лимитирования
+
+// Применяем очень мягкий лимитер для остальных путей аутентификации
+app.use('/api/auth', softLimiter);
+
+// Для остальных путей применяем клиентский лимитер
+app.use('/api/users', clientLimiter);
+app.use('/api/servers', clientLimiter);
 
 // Парсинг запросов
 app.use(express.json());

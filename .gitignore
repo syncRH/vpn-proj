@@ -20,8 +20,8 @@ Desktop.ini
 # Windows
 *.exe
 *.dll
-*.bat
-*.cmd
+# *.bat  # Временно разрешаем .bat файлы
+# *.cmd  # Временно разрешаем .cmd файлы
 
 # Mac
 *.DS_Store
